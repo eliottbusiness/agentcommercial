@@ -1,0 +1,195 @@
+# ============================================
+# WORKFLOW 01: Signal Detection & Processing
+# Version: 1.0 | Agent Commercial Autonome
+# Trigger: Toutes les 4 heures (cron: 0 */4 * * *)
+# ============================================
+
+workflow:
+  name: "Signal Detection & Processing"
+  id: "01_signal_detection"
+  version: "1.0.0"
+
+  trigger:
+    type: "scheduled"
+    cron: "0 */4 * * *"  # Toutes les 4 heures
+
+  description: >
+    Parcourt toutes les sources de signaux d'intention (Twitter, Reddit, 
+    Job Boards, GitHub, SIRENE, Exa) pour détecter de nouveaux signaux 
+    sur les prospects existants et identifier de nouvelles opportunités.
+
+  steps:
+    # --- Étape 1: Initialisation ---
+    - id: "init"
+      name: "Initialize Session"
+      action: "log_start"
+      params:
+        workflow_id: "01_signal_detection"
+        timestamp: "{{now}}"
+
+    # --- Étape 2: Récupération prospects actifs ---
+    - id: "fetch_prospects"
+      name: "Fetch Active Prospects"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT id, company_name, website, linkedin_url, 
+               naf_code, city, last_enrichment_date
+        FROM prospects
+        WHERE status IN ('discovered', 'enriched', 'qualified', 'hot_lead', 'nurture')
+        AND is_duplicated = FALSE
+        ORDER BY last_enrichment_date ASC NULLS FIRST
+        LIMIT 100
+      output: "active_prospects"
+
+    # --- Étape 3: Détection Twitter ---
+    - id: "detect_twitter"
+      name: "Detect Twitter Signals"
+      action: "parallel_for"
+      foreach: "{{active_prospects}}"
+      max_parallel: 5
+      tool: "agent_reach_twitter"
+      query_template: "{{item.company_name}} recrute OR hiring OR problème OR scaling"
+      condition: "item.website IS NOT NULL OR item.linkedin_url IS NOT NULL"
+      output: "twitter_signals"
+
+    # --- Étape 4: Détection Reddit ---
+    - id: "detect_reddit"
+      name: "Detect Reddit Signals"
+      action: "parallel_for"
+      foreach: "{{active_prospects}}"
+      max_parallel: 3
+      tool: "agent_reach_reddit"
+      query_template: "{{item.company_name}} OR {{item.naf_label}}"
+      subreddits: ["r/france", "r/entrepreneur", "r/webdev", "r/startups"]
+      output: "reddit_signals"
+
+    # --- Étape 5: Détection Job Boards ---
+    - id: "detect_jobs"
+      name: "Detect Job Board Signals"
+      action: "parallel_for"
+      foreach: "{{active_prospects}}"
+      max_parallel: 5
+      tool: "exa_mcp"
+      query_template: "site:linkedin.com/jobs "{{item.company_name}}" developer OR engineer OR devops"
+      output: "job_signals"
+
+    # --- Étape 6: Détection SIRENE ---
+    - id: "detect_sirene"
+      name: "Detect SIRENE Changes"
+      action: "batch"
+      tool: "datagouv_mcp"
+      query: |
+        SELECT * FROM sirene_changes 
+        WHERE change_date > NOW() - INTERVAL '4 hours'
+        AND siren IN (SELECT siren FROM prospects WHERE siren IS NOT NULL)
+      output: "sirene_signals"
+
+    # --- Étape 7: Détection Exa Company ---
+    - id: "detect_exa"
+      name: "Detect Exa Company Signals"
+      action: "parallel_for"
+      foreach: "{{active_prospects}}"
+      max_parallel: 5
+      tool: "exa_mcp"
+      query_template: "{{item.company_name}} funding OR raise OR expansion OR launch"
+      output: "exa_signals"
+
+    # --- Étape 8: Consolidation signaux ---
+    - id: "consolidate"
+      name: "Consolidate All Signals"
+      action: "merge"
+      inputs:
+        - "{{twitter_signals}}"
+        - "{{reddit_signals}}"
+        - "{{job_signals}}"
+        - "{{sirene_signals}}"
+        - "{{exa_signals}}"
+      deduplicate_by: ["prospect_id", "signal_type", "signal_source"]
+      output: "all_signals"
+
+    # --- Étape 9: Scoring signaux ---
+    - id: "score_signals"
+      name: "Score New Signals"
+      action: "for_each"
+      foreach: "{{all_signals}}"
+      tool: "scoring_engine"
+      params:
+        signal_type: "{{item.type}}"
+        source: "{{item.source}}"
+        confidence: "{{item.confidence}}"
+        impact: "{{item.impact}}"
+        days_old: "{{item.days_old}}"
+      output: "scored_signals"
+
+    # --- Étape 10: Insertion base ---
+    - id: "insert_signals"
+      name: "Insert Signals to Database"
+      action: "batch_insert"
+      tool: "google_toolbox_postgres"
+      table: "intent_signals"
+      data: "{{scored_signals}}"
+      conflict_resolution: "IGNORE"  # Pas de doublons
+
+    # --- Étape 11: Recalcul scores prospects ---
+    - id: "recalculate_scores"
+      name: "Recalculate Prospect Scores"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        UPDATE prospects p
+        SET 
+          intent_score = calculate_intent_score(p.id),
+          priority_score = calculate_priority_score(p.id),
+          status = CASE 
+            WHEN calculate_intent_score(p.id) >= 85 THEN 'hot_lead'
+            WHEN calculate_intent_score(p.id) >= 70 THEN 'qualified'
+            WHEN calculate_intent_score(p.id) >= 41 THEN 'enriched'
+            ELSE 'nurture'
+          END,
+          updated_at = NOW()
+        WHERE p.id IN (SELECT DISTINCT prospect_id FROM intent_signals WHERE discovered_at > NOW() - INTERVAL '4 hours')
+        AND p.is_duplicated = FALSE
+
+    # --- Étape 12: Notification hot leads ---
+    - id: "notify_hot"
+      name: "Notify New Hot Leads"
+      action: "conditional"
+      condition: "{{recalculate_scores.hot_leads_count}} > 0"
+      then:
+        - action: "send_notification"
+          channel: "slack"  # ou email
+          message: "🚨 {{hot_leads_count}} nouveaux HOT LEADS détectés! Priorité max."
+          include_list: "{{hot_leads_details}}"
+
+    # --- Étape 13: Logging ---
+    - id: "log_completion"
+      name: "Log Completion"
+      action: "log_end"
+      params:
+        workflow_id: "01_signal_detection"
+        signals_detected: "{{all_signals.count}}"
+        hot_leads_created: "{{recalculate_scores.hot_leads_count}}"
+        duration: "{{elapsed_time}}"
+
+  # --- Gestion erreurs ---
+  error_handling:
+    - condition: "tool_failure"
+      action: "retry"
+      max_retries: 3
+      backoff: "exponential"
+
+    - condition: "rate_limit_exceeded"
+      action: "throttle"
+      delay_seconds: 60
+
+    - condition: "all_retries_failed"
+      action: "alert"
+      message: "Workflow 01 failed after retries"
+      channel: "error_log"
+
+  metrics:
+    - signals_detected_per_run
+    - hot_leads_generated
+    - processing_time
+    - error_rate

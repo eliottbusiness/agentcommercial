@@ -1,0 +1,373 @@
+# ============================================
+# WORKFLOW 06: Meeting Booking Automation
+# Version: 1.0 | Agent Commercial Autonome
+# Trigger: Sur réponse positive (webhook) + Toutes les heures (cron: 0 * * * *)
+# ============================================
+
+workflow:
+  name: "Meeting Booking Automation"
+  id: "06_meeting_booking"
+  version: "1.0.0"
+
+  trigger:
+    type: "event_driven"
+    events:
+      - "prospect.status = 'responded'"
+      - "interaction.interaction_type = 'email_replied'"
+      - "interaction.sentiment = 'positive'"
+    scheduled_backup:
+      cron: "0 * * * *"  # Vérification horaire des prospects en attente
+
+  description: >
+    Automatise la proposition de rendez-vous via Cal.com quand un prospect
+    répond positivement. Gère la préparation, les rappels et le suivi post-RDV.
+
+  steps:
+    # --- Étape 1: Détection réponses positives ---
+    - id: "detect_positive_replies"
+      name: "Detect Positive Replies"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          i.id as interaction_id,
+          i.prospect_id,
+          i.content as reply_content,
+          i.created_at as reply_time,
+          p.company_name, p.city, p.decision_maker_name, p.decision_maker_title,
+          p.contact_email, p.website, p.intent_score, p.fit_score, p.priority_score,
+          p.status, p.intent_signals, p.tech_stack
+        FROM interactions i
+        JOIN prospects p ON i.prospect_id = p.id
+        WHERE i.interaction_type = 'email_replied'
+        AND i.sentiment = 'positive'
+        AND i.created_at > NOW() - INTERVAL '1 hour'
+        AND p.status IN ('contacted', 'responded', 'hot_lead')
+        AND p.is_duplicated = FALSE
+        AND NOT EXISTS (
+          SELECT 1 FROM interactions i2 
+          WHERE i2.prospect_id = p.id 
+          AND i2.interaction_type = 'meeting_booked'
+        )
+        ORDER BY p.priority_score DESC
+        LIMIT 20
+      output: "positive_replies"
+
+    # --- Étape 2: Analyse sentiment & intention ---
+    - id: "analyze_intent"
+      name: "Analyze Reply Intent"
+      action: "for_each"
+      foreach: "{{positive_replies}}"
+      tool: "nlp_engine"
+      method: "analyze_intent"
+      params:
+        text: "{{item.reply_content}}"
+        detect:
+          - "meeting_request": ["rendez-vous", "RDV", "appel", "échange", "discuter", "parler", "voir ensemble"]
+          - "info_request": ["informations", "détails", "préciser", "en savoir plus", "documentation"]
+          - "pricing_request": ["tarif", "prix", "coût", "budget", "devis", "facturation"]
+          - "timing_request": ["quand", "disponible", "créneau", "semaine prochaine", "ce mois"]
+          - "referral": ["collègue", "responsable", "mon chef", "autre personne", "pas le bon interlocuteur"]
+      output: "reply_intents"
+
+    # --- Étape 3: Sélection type de RDV ---
+    - id: "select_meeting_type"
+      name: "Select Meeting Type"
+      action: "for_each"
+      foreach: "{{reply_intents}}"
+      tool: "decision_engine"
+      rules:
+        - condition: "item.intent.meeting_request = true AND item.prospect.priority_score >= 70"
+          then: "discovery_call"
+
+        - condition: "item.intent.pricing_request = true AND item.prospect.status = 'responded'"
+          then: "discovery_call"
+
+        - condition: "item.intent.info_request = true AND item.prospect.priority_score >= 60"
+          then: "discovery_call"
+
+        - condition: "item.intent.referral = true"
+          then: "referral_handling"
+
+        - condition: "item.prospect.status = 'meeting_booked'"
+          then: "follow_up_call"
+
+        - default: "discovery_call"
+      output: "meeting_types"
+
+    # --- Étape 4: Génération lien Cal.com ---
+    - id: "generate_cal_links"
+      name: "Generate Cal.com Links"
+      action: "for_each"
+      foreach: "{{meeting_types}}"
+      condition: "item.meeting_type != 'referral_handling'"
+      tool: "cal_com_api"
+      method: "create_booking_link"
+      params:
+        event_type: "{{item.meeting_type}}"
+        prospect_name: "{{item.prospect.decision_maker_name}}"
+        prospect_email: "{{item.prospect.contact_email}}"
+        prospect_company: "{{item.prospect.company_name}}"
+
+        # Pré-remplissage questions intake
+        prefill:
+          company_name: "{{item.prospect.company_name}}"
+          company_size: "{{item.prospect.employee_count_band}}"
+
+        # Paramètres Cal.com
+        duration: "{{item.meeting_type == 'discovery_call' ? 30 : 15}}"
+        timezone: "Europe/Paris"
+
+        # UTM tracking
+        utm_source: "agent_autonome"
+        utm_medium: "email"
+        utm_campaign: "{{item.prospect.source}}"
+        utm_content: "{{item.prospect.id}}"
+
+      output: "cal_links"
+
+    # --- Étape 5: Génération email de proposition RDV ---
+    - id: "generate_meeting_emails"
+      name: "Generate Meeting Proposal Emails"
+      action: "for_each"
+      foreach: "{{cal_links}}"
+      tool: "personalization_engine"
+      method: "generate_meeting_email"
+      params:
+        prospect: "{{item.prospect}}"
+        reply_intent: "{{item.reply_intent}}"
+        meeting_type: "{{item.meeting_type}}"
+        cal_link: "{{item.cal_link}}"
+
+        templates:
+          discovery_call: |
+            Bonjour {{prospect.decision_maker_name}},
+
+            Merci pour votre retour ! Ravie(e) de voir que {{prospect.company_name}} 
+            s'intéresse à {{topic_based_on_intent}}.
+
+            {{personalized_value_prop}}
+
+            Je vous propose un échange de 30 minutes cette semaine ou la suivante :
+            👉 {{cal_link}}
+
+            J'ai préparé quelques questions sur {{prospect.pain_point}} pour que notre 
+            échange soit le plus concret possible.
+
+            À bientôt,
+            {{agent_name}}
+
+          follow_up: |
+            Bonjour {{prospect.decision_maker_name}},
+
+            Suite à notre échange, je vous propose un court point de 15 minutes 
+            pour répondre à vos questions sur {{topic}}.
+
+            👉 {{cal_link}}
+
+            Cordialement,
+            {{agent_name}}
+
+      output: "meeting_emails"
+
+    # --- Étape 6: Envoi emails proposition ---
+    - id: "send_meeting_emails"
+      name: "Send Meeting Proposal Emails"
+      action: "for_each"
+      foreach: "{{meeting_emails}}"
+      tool: "email_service"
+      method: "send"
+      params:
+        to: "{{item.prospect.contact_email}}"
+        subject: "Votre appel découverte - {{item.prospect.company_name}}"
+        body: "{{item.email_body}}"
+        from: "{{agent_email}}"
+        reply_to: "{{agent_email}}"
+        track_opens: true
+        track_clicks: true
+      output: "sent_meeting_emails"
+
+    # --- Étape 7: Logging interactions ---
+    - id: "log_meeting_proposals"
+      name: "Log Meeting Proposals"
+      action: "batch_insert"
+      tool: "google_toolbox_postgres"
+      table: "interactions"
+      data: |
+        {% for email in sent_meeting_emails %}
+        {
+          prospect_id: "{{email.prospect_id}}",
+          interaction_type: "email_sent",
+          channel: "email",
+          content: "Meeting proposal: {{email.subject}} | {{email.body_preview}}",
+          sentiment: "positive",
+          created_at: "{{now}}"
+        }
+        {% endfor %}
+      output: "proposal_logs"
+
+    # --- Étape 8: Mise à jour statuts ---
+    - id: "update_statuses"
+      name: "Update Prospect Statuses"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        UPDATE prospects
+        SET status = 'responded',
+            last_contact_date = NOW(),
+            next_action_date = NOW() + INTERVAL '7 days',
+            updated_at = NOW()
+        WHERE id IN (SELECT prospect_id FROM {{sent_meeting_emails}})
+
+    # --- Étape 9: Gestion referrals ---
+    - id: "handle_referrals"
+      name: "Handle Referrals"
+      action: "for_each"
+      foreach: "{{reply_intents}}"
+      condition: "item.intent.referral = true"
+      tool: "referral_engine"
+      method: "process_referral"
+      params:
+        original_prospect_id: "{{item.prospect_id}}"
+        reply_content: "{{item.reply_content}}"
+        action:
+          - "Extract referred person name and title from reply"
+          - "Search LinkedIn for referred person"
+          - "Create new prospect record for referred person"
+          - "Link to original prospect"
+          - "Send personalized email to referred person"
+          - "Log referral interaction"
+      output: "referral_results"
+
+    # --- Étape 10: Préparation pré-RDV (si booking déjà fait) ---
+    - id: "prepare_meeting_brief"
+      name: "Prepare Meeting Briefs"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          p.id, p.company_name, p.city, p.naf_label, p.employee_count_band,
+          p.website, p.decision_maker_name, p.decision_maker_title,
+          p.intent_signals, p.tech_stack, p.notes,
+          i.cal_com_event_id, i.created_at as booking_date
+        FROM prospects p
+        JOIN interactions i ON p.id = i.prospect_id
+        WHERE i.interaction_type = 'meeting_booked'
+        AND i.created_at > NOW() - INTERVAL '24 hours'
+        AND p.status = 'meeting_booked'
+        AND NOT EXISTS (
+          SELECT 1 FROM interactions i2 
+          WHERE i2.prospect_id = p.id 
+          AND i2.interaction_type = 'meeting_brief_sent'
+        )
+        ORDER BY i.created_at DESC
+        LIMIT 10
+      output: "meetings_to_prepare"
+
+    - id: "generate_briefs"
+      name: "Generate Meeting Briefs"
+      action: "for_each"
+      foreach: "{{meetings_to_prepare}}"
+      tool: "briefing_engine"
+      method: "generate_brief"
+      params:
+        prospect: "{{item}}"
+        include:
+          - "Company overview and recent signals"
+          - "Decision maker profile and background"
+          - "Tech stack analysis"
+          - "Pain points identified"
+          - "Recommended questions to ask"
+          - "Likely objections and responses"
+          - "Similar case studies"
+          - "Next steps to propose"
+      output: "meeting_briefs"
+
+    - id: "send_briefs"
+      name: "Send Briefs to Agent"
+      action: "for_each"
+      foreach: "{{meeting_briefs}}"
+      tool: "notification_service"
+      method: "send"
+      channel: "slack"
+      message: |
+        📋 BRIEF RDV - {{item.prospect.company_name}}
+
+        Date: {{item.meeting_date}}
+        Prospect: {{item.prospect.decision_maker_name}} ({{item.prospect.decision_maker_title}})
+
+        {{item.brief_content}}
+
+        Lien Cal.com: {{item.cal_com_event_id}}
+      output: "brief_notifications"
+
+    # --- Étape 11: Rappels automatiques ---
+    - id: "send_reminders"
+      name: "Send Meeting Reminders"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          p.id, p.company_name, p.decision_maker_name, p.contact_email,
+          i.cal_com_event_id, i.created_at as booking_time
+        FROM prospects p
+        JOIN interactions i ON p.id = i.prospect_id
+        WHERE i.interaction_type = 'meeting_booked'
+        AND i.created_at BETWEEN NOW() - INTERVAL '25 hours' AND NOW() - INTERVAL '23 hours'
+        AND p.status = 'meeting_booked'
+      output: "meetings_24h"
+
+    - id: "send_24h_reminders"
+      name: "Send 24h Reminders"
+      action: "for_each"
+      foreach: "{{meetings_24h}}"
+      tool: "email_service"
+      method: "send"
+      params:
+        to: "{{item.contact_email}}"
+        subject: "Rappel: Notre appel demain"
+        body: |
+          Bonjour {{item.decision_maker_name}},
+
+          Je vous confirme notre rendez-vous demain.
+
+          J'ai hâte d'échanger avec vous sur {{contexte_personnalisé}}.
+
+          À demain !
+          {{agent_name}}
+      output: "sent_reminders"
+
+    # --- Étape 12: Logging final ---
+    - id: "log_booking"
+      name: "Log Booking Results"
+      action: "log_end"
+      params:
+        workflow_id: "06_meeting_booking"
+        positive_replies_detected: "{{positive_replies.count}}"
+        meeting_proposals_sent: "{{sent_meeting_emails.count}}"
+        referrals_handled: "{{referral_results.count}}"
+        briefs_generated: "{{meeting_briefs.count}}"
+        reminders_sent: "{{sent_reminders.count}}"
+
+  error_handling:
+    - condition: "cal_api_error"
+      action: "retry"
+      max_retries: 3
+      delay: 60
+
+    - condition: "email_send_failure"
+      action: "retry"
+      max_retries: 2
+      delay: 300
+
+    - condition: "referral_extraction_failed"
+      action: "manual_review"
+      message: "Could not extract referral info from reply {{item.interaction_id}}"
+
+  metrics:
+    - positive_replies_per_run
+    - meeting_proposals_sent
+    - meeting_booking_rate
+    - referral_conversion_rate
+    - brief_generation_rate
+    - reminder_delivery_rate

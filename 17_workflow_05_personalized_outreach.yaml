@@ -1,0 +1,319 @@
+# ============================================
+# WORKFLOW 05: Personalized Outreach
+# Version: 1.0 | Agent Commercial Autonome
+# Trigger: Toutes les 2 heures (cron: 0 */2 * * *)
+# ============================================
+
+workflow:
+  name: "Personalized Outreach"
+  id: "05_personalized_outreach"
+  version: "1.0.0"
+
+  trigger:
+    type: "scheduled"
+    cron: "0 */2 * * *"  # Toutes les 2 heures
+
+  description: >
+    Génère et envoie des emails hyper-personnalisés aux prospects qualifiés
+    (hot_lead et qualified). Max 10 emails/jour. Validation humaine pour super hot.
+
+  steps:
+    # --- Étape 1: Check daily quota ---
+    - id: "check_quota"
+      name: "Check Daily Outreach Quota"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT COUNT(*) as sent_today
+        FROM interactions
+        WHERE interaction_type = 'email_sent'
+        AND channel = 'email'
+        AND created_at > CURRENT_DATE
+      output: "quota_check"
+
+    - id: "quota_gate"
+      name: "Quota Gate"
+      action: "conditional"
+      condition: "{{quota_check.sent_today}} >= 10"
+      then:
+        - action: "exit"
+          message: "Daily outreach quota reached (10 emails). Skipping."
+      else:
+        - action: "continue"
+          remaining_quota: "{{10 - quota_check.sent_today}}"
+
+    # --- Étape 2: Récupération prospects à contacter ---
+    - id: "fetch_outreach_targets"
+      name: "Fetch Outreach Targets"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          p.id, p.company_name, p.city, p.naf_label, p.employee_count_band,
+          p.website, p.contact_email, p.decision_maker_name, p.decision_maker_title,
+          p.intent_score, p.fit_score, p.priority_score, p.status,
+          p.intent_signals, p.tech_stack, p.notes,
+          MAX(i.created_at) FILTER (WHERE i.interaction_type = 'email_sent') as last_email_sent
+        FROM prospects p
+        LEFT JOIN interactions i ON p.id = i.prospect_id
+        WHERE p.status IN ('hot_lead', 'qualified')
+        AND p.is_duplicated = FALSE
+        AND p.contact_email IS NOT NULL
+        AND (
+          i.id IS NULL 
+          OR i.created_at < NOW() - INTERVAL '7 days'
+          OR NOT EXISTS (
+            SELECT 1 FROM interactions i2 
+            WHERE i2.prospect_id = p.id 
+            AND i2.interaction_type = 'email_sent'
+          )
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM interactions i3 
+          WHERE i3.prospect_id = p.id 
+          AND i3.interaction_type = 'email_replied'
+        )
+        ORDER BY p.priority_score DESC, p.intent_score DESC
+        LIMIT {{remaining_quota}}
+      output: "outreach_targets"
+
+    # --- Étape 3: Vérification gate humain (super hot) ---
+    - id: "human_gate_check"
+      name: "Human Gate for Super Hot"
+      action: "for_each"
+      foreach: "{{outreach_targets}}"
+      condition: "item.priority_score >= 85 AND item.intent_score >= 85"
+      then:
+        - action: "create_approval_request"
+          message: |
+            🔥 SUPER HOT LEAD - Approbation requise
+
+            Prospect: {{item.company_name}} ({{item.city}})
+            Score: {{item.priority_score}}/100 (Intent: {{item.intent_score}}, Fit: {{item.fit_score}})
+            Décideur: {{item.decision_maker_name}} ({{item.decision_maker_title}})
+            Email: {{item.contact_email}}
+
+            Signaux: {{item.intent_signals}}
+
+            Approuver l'envoi? (Timeout: 12h)
+          timeout_hours: 12
+          auto_approve: false
+      else:
+        - action: "auto_approve"
+
+    # --- Étape 4: Recherche contextuelle approfondie (super hot) ---
+    - id: "deep_research"
+      name: "Deep Research for Super Hot"
+      action: "parallel_for"
+      foreach: "{{outreach_targets}}"
+      max_parallel: 3
+      condition: "item.priority_score >= 85"
+      steps:
+        - id: "website_deep_dive"
+          tool: "agent_reach_web"
+          method: "jina_reader"
+          url: "https://r.jina.ai/{{item.website}}"
+
+        - id: "twitter_research"
+          tool: "agent_reach_twitter"
+          method: "twitter_search"
+          query: "{{item.company_name}}"
+
+        - id: "exa_research"
+          tool: "exa_mcp"
+          method: "exa_search"
+          query: "{{item.company_name}} recent news funding expansion"
+
+      output: "deep_research_data"
+
+    # --- Étape 5: Génération email personnalisé ---
+    - id: "generate_emails"
+      name: "Generate Personalized Emails"
+      action: "for_each"
+      foreach: "{{outreach_targets}}"
+      tool: "personalization_engine"
+      method: "generate_email"
+      params:
+        prospect_id: "{{item.id}}"
+        company_name: "{{item.company_name}}"
+        city: "{{item.city}}"
+        naf_label: "{{item.naf_label}}"
+        employee_count: "{{item.employee_count_band}}"
+        decision_maker_name: "{{item.decision_maker_name}}"
+        decision_maker_title: "{{item.decision_maker_title}}"
+        intent_score: "{{item.intent_score}}"
+        priority_score: "{{item.priority_score}}"
+        intent_signals: "{{item.intent_signals}}"
+        tech_stack: "{{item.tech_stack}}"
+        website_content: "{{deep_research_data.website_deep_dive}}"
+        twitter_signals: "{{deep_research_data.twitter_research}}"
+        exa_news: "{{deep_research_data.exa_research}}"
+
+        # Règles de génération
+        rules:
+          - "Commencer par le signal d'intention principal"
+          - "Référencer un élément spécifique du site web"
+          - "Proposer une valeur alignée sur le pain point"
+          - "Inclure un social proof sectoriel"
+          - "Un seul CTA clair"
+          - "Longueur: 150-250 mots"
+          - "Ton: professionnel mais chaleureux"
+          - "Jamais de template évident"
+
+      output: "generated_emails"
+
+    # --- Étape 6: Vérification anti-spam ---
+    - id: "spam_check"
+      name: "Anti-Spam Verification"
+      action: "for_each"
+      foreach: "{{generated_emails}}"
+      tool: "verification_engine"
+      checks:
+        - "word_count BETWEEN 100 AND 300"
+        - "link_count <= 2"
+        - "exclamation_count <= 1"
+        - "uppercase_ratio <= 0.05"
+        - "spam_keywords NOT IN ['gratuit', 'promotion', 'offre limitée', 'urgent', 'gagner']"
+        - "template_similarity_score <= 0.3"
+        - "personalization_score >= 0.7"
+      output: "verified_emails"
+
+    # --- Étape 7: Envoi emails ---
+    - id: "send_emails"
+      name: "Send Emails"
+      action: "for_each"
+      foreach: "{{verified_emails}}"
+      condition: "item.spam_check_passed = true"
+      tool: "email_service"
+      method: "send"
+      params:
+        to: "{{item.prospect.contact_email}}"
+        subject: "{{item.email.subject}}"
+        body: "{{item.email.body}}"
+        from: "{{agent_email}}"
+        reply_to: "{{agent_email}}"
+        track_opens: true
+        track_clicks: true
+
+      output: "sent_emails"
+
+    # --- Étape 8: Logging interactions ---
+    - id: "log_interactions"
+      name: "Log Sent Interactions"
+      action: "batch_insert"
+      tool: "google_toolbox_postgres"
+      table: "interactions"
+      data: |
+        {% for email in sent_emails %}
+        {
+          prospect_id: "{{email.prospect_id}}",
+          interaction_type: "email_sent",
+          channel: "email",
+          content: "Subject: {{email.subject}} | Body: {{email.body_preview}}",
+          sentiment: "neutral",
+          created_at: "{{now}}"
+        }
+        {% endfor %}
+      output: "interaction_logs"
+
+    # --- Étape 9: Mise à jour statuts prospects ---
+    - id: "update_statuses"
+      name: "Update Prospect Statuses"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        UPDATE prospects
+        SET status = 'contacted',
+            last_contact_date = NOW(),
+            next_action_date = NOW() + INTERVAL '3 days',
+            updated_at = NOW()
+        WHERE id IN (SELECT prospect_id FROM {{sent_emails}})
+        AND status IN ('hot_lead', 'qualified')
+
+    # --- Étape 10: Création séquences de suivi ---
+    - id: "create_sequences"
+      name: "Create Follow-up Sequences"
+      action: "for_each"
+      foreach: "{{sent_emails}}"
+      tool: "sequence_engine"
+      method: "create_sequence"
+      params:
+        prospect_id: "{{item.prospect_id}}"
+        sequence_type: "{{item.prospect.priority_score >= 85 ? 'super_hot' : 'hot'}}"
+        first_step_sent: true
+        next_steps:
+          - step: 2
+            delay_hours: 48
+            channel: "linkedin"
+            type: "connection_request"
+
+          - step: 3
+            delay_hours: 96
+            channel: "email"
+            type: "follow_up"
+            condition: "no_reply"
+
+          - step: 4
+            delay_hours: 168
+            channel: "email"
+            type: "case_study"
+            condition: "no_reply"
+
+          - step: 5
+            delay_hours: 336
+            channel: "linkedin"
+            type: "soft_touch"
+            condition: "no_reply"
+      output: "created_sequences"
+
+    # --- Étape 11: Métriques & Rapport ---
+    - id: "metrics"
+      name: "Generate Outreach Metrics"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          COUNT(*) as emails_sent,
+          COUNT(*) FILTER (WHERE p.priority_score >= 85) as super_hot_sent,
+          COUNT(*) FILTER (WHERE p.priority_score BETWEEN 70 AND 84) as hot_sent,
+          AVG(LENGTH(i.content)) as avg_email_length,
+          COUNT(*) FILTER (WHERE i.sentiment = 'positive') as positive_signals
+        FROM interactions i
+        JOIN prospects p ON i.prospect_id = p.id
+        WHERE i.created_at > CURRENT_DATE
+        AND i.interaction_type = 'email_sent'
+      output: "outreach_metrics"
+
+    # --- Étape 12: Logging ---
+    - id: "log_outreach"
+      name: "Log Outreach Results"
+      action: "log_end"
+      params:
+        workflow_id: "05_personalized_outreach"
+        emails_sent: "{{sent_emails.count}}"
+        super_hot_sent: "{{outreach_metrics.super_hot_sent}}"
+        hot_sent: "{{outreach_metrics.hot_sent}}"
+        sequences_created: "{{created_sequences.count}}"
+        spam_blocked: "{{generated_emails.count - verified_emails.count}}"
+
+  error_handling:
+    - condition: "email_send_failure"
+      action: "retry"
+      max_retries: 3
+      delay: 300
+
+    - condition: "spam_check_failed"
+      action: "log_warning"
+      message: "Email blocked by spam check for prospect {{item.prospect_id}}"
+
+    - condition: "human_approval_timeout"
+      action: "auto_approve"
+      message: "Auto-approved after 12h timeout for super hot lead"
+
+  metrics:
+    - emails_sent_per_run
+    - super_hot_emails_sent
+    - hot_emails_sent
+    - spam_check_pass_rate
+    - human_approval_rate
+    - sequence_creation_rate

@@ -1,0 +1,132 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schema.json",
+  "version": "1.0",
+  "description": "Configuration MCP pour Agent Commercial Autonome - Stack 100% gratuite",
+
+  "servers": {
+    "datagouv-mcp": {
+      "type": "streamable-http",
+      "url": "https://mcp.data.gouv.fr/mcp",
+      "description": "API data.gouv.fr - Données ouvertes françaises, SIRENE, entreprises",
+      "tools_used": [
+        "search_datasets",
+        "search_organizations", 
+        "get_dataset_info",
+        "list_dataset_resources",
+        "query_resource_data",
+        "search_dataservices",
+        "get_dataservice_info",
+        "get_dataservice_openapi_spec",
+        "get_metrics"
+      ],
+      "rate_limits": {
+        "notes": "Pas de limite stricte documentée, usage raisonnable requis"
+      },
+      "auth": "Aucune - API publique et gratuite",
+      "free_tier": true
+    },
+
+    "exa-mcp": {
+      "type": "streamable-http",
+      "url": "https://mcp.exa.ai/mcp",
+      "description": "Exa MCP - Recherche sémantique web, entreprises, contenu",
+      "tools_used": [
+        "exa_search",
+        "exa_company_search",
+        "exa_contents",
+        "exa_find_similar"
+      ],
+      "rate_limits": {
+        "unauthenticated": "3 QPS, 150 appels/jour",
+        "free_tier": "1000 requêtes/mois",
+        "notes": "MCP gratuit sans clé API, limité à 150 calls/jour"
+      },
+      "auth": "Optionnel - Sans clé: 150/jour. Avec clé: 1000/mois gratuits",
+      "free_tier": true,
+      "pricing": "Search: $7/1k requêtes, Contents: $1/1k pages"
+    },
+
+    "google-toolbox-postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@toolbox-sdk/server",
+        "--prebuilt=postgres",
+        "--stdio"
+      ],
+      "description": "Google MCP Toolbox - Accès base de données Supabase PostgreSQL",
+      "tools_used": [
+        "list_tables",
+        "execute_sql",
+        "query_resource_data"
+      ],
+      "env": {
+        "TOOLBOX_DATABASE_HOST": "${SUPABASE_HOST}",
+        "TOOLBOX_DATABASE_PORT": "${SUPABASE_PORT}",
+        "TOOLBOX_DATABASE_NAME": "${SUPABASE_DB_NAME}",
+        "TOOLBOX_DATABASE_USER": "${SUPABASE_USER}",
+        "TOOLBOX_DATABASE_PASSWORD": "${SUPABASE_PASSWORD}"
+      },
+      "free_tier": true,
+      "notes": "Open source, self-hosted, aucun coût"
+    },
+
+    "agent-reach": {
+      "type": "stdio",
+      "command": "agent-reach",
+      "args": ["mcp"],
+      "description": "Agent Reach - Lecture web, Twitter/X, Reddit, YouTube, GitHub, RSS",
+      "tools_used": [
+        "web_read",
+        "twitter_search",
+        "twitter_read_tweet",
+        "youtube_subtitles",
+        "github_repo_info",
+        "rss_read",
+        "exa_search_via_agent_reach"
+      ],
+      "rate_limits": {
+        "notes": "Dépend des backends. Jina Reader: gratuit illimité. Twitter: via cookie (risque ban)"
+      },
+      "auth": "Variable - Web: aucune. Twitter/Reddit: cookies navigateur",
+      "free_tier": true,
+      "installation": "pip install agent-reach && agent-reach install"
+    },
+
+    "overpass-api": {
+      "type": "http",
+      "url": "https://overpass-api.de/api/interpreter",
+      "description": "Overpass API - Entreprises physiques par catégorie géographique (OpenStreetMap)",
+      "tools_used": [
+        "overpass_query"
+      ],
+      "query_language": "Overpass QL",
+      "rate_limits": {
+        "max_requests": "~10 000/jour recommandé",
+        "timeout": "180 secondes",
+        "notes": "Usage raisonnable, pas de clé requise"
+      },
+      "auth": "Aucune - API publique OpenStreetMap",
+      "free_tier": true,
+      "data_coverage": "Restaurants, cafés, hôtels, hôpitaux, pharmacies, écoles, banques, supermarchés, etc."
+    }
+  },
+
+  "composio_integration": {
+    "description": "Composio - Orchestration et auth déléguée (optionnel, free tier)",
+    "url": "https://composio.dev",
+    "free_tier": {
+      "available": true,
+      "limits": "Usage généreux pour prototypage",
+      "tools_count": "1000+ apps"
+    },
+    "used_for": [
+      "Gmail send",
+      "LinkedIn outreach", 
+      "Slack notifications",
+      "Notion CRM sync"
+    ],
+    "note": "Alternative: utiliser les APIs directement via Agent Reach pour rester 100% gratuit"
+  }
+}

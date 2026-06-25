@@ -1,0 +1,469 @@
+# ============================================
+# WORKFLOW 07: Feedback Loop & Optimization
+# Version: 1.0 | Agent Commercial Autonome
+# Trigger: Tous les jours à 8h00 (cron: 0 8 * * *)
+# ============================================
+
+workflow:
+  name: "Feedback Loop & Optimization"
+  id: "07_feedback_loop"
+  version: "1.0.0"
+
+  trigger:
+    type: "scheduled"
+    cron: "0 8 * * *"  # 8h00 matin (rapport quotidien)
+
+  description: >
+    Analyse les performances de l'agent, identifie les patterns de succès/échec,
+    et ajuste automatiquement les paramètres ICP, scoring, et séquences.
+    C'est la boucle d'auto-vérification et d'amélioration continue.
+
+  steps:
+    # --- Étape 1: Collecte données performances ---
+    - id: "collect_performance"
+      name: "Collect Performance Data"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        WITH daily_stats AS (
+          SELECT 
+            DATE(created_at) as date,
+            COUNT(*) FILTER (WHERE status = 'discovered') as discovered,
+            COUNT(*) FILTER (WHERE status = 'enriched') as enriched,
+            COUNT(*) FILTER (WHERE status = 'qualified') as qualified,
+            COUNT(*) FILTER (WHERE status = 'hot_lead') as hot_leads,
+            COUNT(*) FILTER (WHERE status = 'contacted') as contacted,
+            COUNT(*) FILTER (WHERE status = 'responded') as responded,
+            COUNT(*) FILTER (WHERE status = 'meeting_booked') as meetings,
+            COUNT(*) FILTER (WHERE status = 'proposal_sent') as proposals,
+            COUNT(*) FILTER (WHERE status = 'won') as won,
+            COUNT(*) FILTER (WHERE status = 'lost') as lost,
+            AVG(intent_score) as avg_intent,
+            AVG(fit_score) as avg_fit,
+            AVG(priority_score) as avg_priority
+          FROM prospects
+          WHERE created_at > CURRENT_DATE - INTERVAL '30 days'
+          GROUP BY DATE(created_at)
+          ORDER BY date DESC
+        ),
+        source_stats AS (
+          SELECT 
+            source,
+            COUNT(*) as total,
+            COUNT(*) FILTER (WHERE status = 'won') as won,
+            COUNT(*) FILTER (WHERE status = 'meeting_booked') as meetings,
+            AVG(intent_score) as avg_intent,
+            AVG(priority_score) as avg_priority
+          FROM prospects
+          WHERE created_at > CURRENT_DATE - INTERVAL '30 days'
+          GROUP BY source
+        ),
+        sequence_stats AS (
+          SELECT 
+            sequence_name,
+            COUNT(*) as total_sent,
+            COUNT(*) FILTER (WHERE status = 'replied') as replied,
+            COUNT(*) FILTER (WHERE status = 'meeting_booked') as meetings,
+            AVG(CASE WHEN status = 'replied' THEN 1 ELSE 0 END) as reply_rate
+          FROM outreach_sequences
+          WHERE created_at > CURRENT_DATE - INTERVAL '30 days'
+          GROUP BY sequence_name
+        )
+        SELECT 
+          jsonb_build_object(
+            'daily_stats', (SELECT jsonb_agg(daily_stats) FROM daily_stats),
+            'source_stats', (SELECT jsonb_agg(source_stats) FROM source_stats),
+            'sequence_stats', (SELECT jsonb_agg(sequence_stats) FROM sequence_stats)
+          ) as performance_data
+      output: "performance_data"
+
+    # --- Étape 2: Analyse conversion funnel ---
+    - id: "analyze_funnel"
+      name: "Analyze Conversion Funnel"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        WITH funnel AS (
+          SELECT 
+            status,
+            COUNT(*) as count
+          FROM prospects
+          WHERE created_at > CURRENT_DATE - INTERVAL '30 days'
+          GROUP BY status
+        )
+        SELECT 
+          jsonb_build_object(
+            'discovered', (SELECT count FROM funnel WHERE status = 'discovered'),
+            'to_enriched', (SELECT count FROM funnel WHERE status = 'enriched'),
+            'to_qualified', (SELECT count FROM funnel WHERE status = 'qualified'),
+            'to_hot_lead', (SELECT count FROM funnel WHERE status = 'hot_lead'),
+            'to_contacted', (SELECT count FROM funnel WHERE status = 'contacted'),
+            'to_responded', (SELECT count FROM funnel WHERE status = 'responded'),
+            'to_meeting', (SELECT count FROM funnel WHERE status = 'meeting_booked'),
+            'to_proposal', (SELECT count FROM funnel WHERE status = 'proposal_sent'),
+            'to_won', (SELECT count FROM funnel WHERE status = 'won'),
+            'to_lost', (SELECT count FROM funnel WHERE status = 'lost')
+          ) as funnel_data
+      output: "funnel_data"
+
+    # --- Étape 3: Calcul KPIs ---
+    - id: "calculate_kpis"
+      name: "Calculate KPIs"
+      action: "script"
+      tool: "python"
+      code: |
+        funnel = {{funnel_data}}
+
+        kpis = {}
+
+        # Conversion rates
+        discovered = funnel.get('discovered', 0) + funnel.get('enriched', 0) + funnel.get('qualified', 0) + funnel.get('hot_lead', 0)
+        kpis['discovery_to_meeting'] = round(funnel.get('to_meeting', 0) / max(discovered, 1) * 100, 2)
+        kpis['meeting_to_proposal'] = round(funnel.get('to_proposal', 0) / max(funnel.get('to_meeting', 0), 1) * 100, 2)
+        kpis['proposal_to_won'] = round(funnel.get('to_won', 0) / max(funnel.get('to_proposal', 0), 1) * 100, 2)
+        kpis['overall_conversion'] = round(funnel.get('to_won', 0) / max(discovered, 1) * 100, 2)
+
+        # Engagement metrics
+        kpis['email_reply_rate'] = round({{performance_data}}.get('sequence_stats', {}).get('reply_rate', 0) * 100, 2)
+
+        # Quality metrics
+        kpis['avg_intent_score'] = round({{performance_data}}.get('daily_stats', [{}])[0].get('avg_intent', 0), 2)
+        kpis['avg_fit_score'] = round({{performance_data}}.get('daily_stats', [{}])[0].get('avg_fit', 0), 2)
+
+        # Target vs actual
+        kpis['target_conversion'] = 30  # 30% target
+        kpis['target_reply_rate'] = 25  # 25% target
+        kpis['target_meeting_rate'] = 15  # 15% target
+
+        kpis['conversion_gap'] = kpis['target_conversion'] - kpis['overall_conversion']
+        kpis['reply_gap'] = kpis['target_reply_rate'] - kpis['email_reply_rate']
+
+        return kpis
+      output: "kpis"
+
+    # --- Étape 4: Détection patterns succès ---
+    - id: "detect_success_patterns"
+      name: "Detect Success Patterns"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          p.source,
+          p.naf_code,
+          p.city,
+          p.employee_count_band,
+          AVG(p.intent_score) as avg_intent,
+          AVG(p.fit_score) as avg_fit,
+          COUNT(*) FILTER (WHERE p.status = 'won') as won_count,
+          COUNT(*) as total_count,
+          ROUND(COUNT(*) FILTER (WHERE p.status = 'won')::numeric / COUNT(*) * 100, 2) as win_rate
+        FROM prospects p
+        WHERE p.created_at > CURRENT_DATE - INTERVAL '30 days'
+        AND p.status IN ('won', 'lost', 'meeting_booked', 'proposal_sent', 'negotiation')
+        GROUP BY p.source, p.naf_code, p.city, p.employee_count_band
+        HAVING COUNT(*) >= 5
+        ORDER BY win_rate DESC
+        LIMIT 20
+      output: "success_patterns"
+
+    # --- Étape 5: Détection patterns échec ---
+    - id: "detect_failure_patterns"
+      name: "Detect Failure Patterns"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          p.source,
+          p.naf_code,
+          p.city,
+          p.employee_count_band,
+          AVG(p.intent_score) as avg_intent,
+          COUNT(*) FILTER (WHERE p.status = 'lost') as lost_count,
+          COUNT(*) as total_count,
+          ROUND(COUNT(*) FILTER (WHERE p.status = 'lost')::numeric / COUNT(*) * 100, 2) as loss_rate
+        FROM prospects p
+        WHERE p.created_at > CURRENT_DATE - INTERVAL '30 days'
+        AND p.status IN ('won', 'lost', 'meeting_booked', 'proposal_sent', 'negotiation')
+        GROUP BY p.source, p.naf_code, p.city, p.employee_count_band
+        HAVING COUNT(*) >= 5
+        ORDER BY loss_rate DESC
+        LIMIT 20
+      output: "failure_patterns"
+
+    # --- Étape 6: Analyse séquences performantes ---
+    - id: "analyze_sequences"
+      name: "Analyze Sequence Performance"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          s.sequence_name,
+          s.step_number,
+          s.step_type,
+          COUNT(*) as total_sent,
+          COUNT(*) FILTER (WHERE i.interaction_type = 'email_replied' AND i.created_at > s.sent_at) as replies,
+          COUNT(*) FILTER (WHERE i.interaction_type = 'meeting_booked') as meetings,
+          ROUND(
+            COUNT(*) FILTER (WHERE i.interaction_type = 'email_replied')::numeric / 
+            NULLIF(COUNT(*), 0) * 100, 2
+          ) as reply_rate,
+          AVG(EXTRACT(EPOCH FROM (i.created_at - s.sent_at)) / 3600) as avg_reply_time_hours
+        FROM outreach_sequences s
+        LEFT JOIN interactions i ON s.prospect_id = i.prospect_id
+        WHERE s.created_at > CURRENT_DATE - INTERVAL '30 days'
+        GROUP BY s.sequence_name, s.step_number, s.step_type
+        HAVING COUNT(*) >= 10
+        ORDER BY reply_rate DESC
+      output: "sequence_performance"
+
+    # --- Étape 7: Génération rapport optimisation ---
+    - id: "generate_optimization_report"
+      name: "Generate Optimization Report"
+      action: "script"
+      tool: "python"
+      code: |
+        kpis = {{kpis}}
+        success_patterns = {{success_patterns}}
+        failure_patterns = {{failure_patterns}}
+        sequence_performance = {{sequence_performance}}
+
+        report = {
+          "date": "{{now}}",
+          "summary": {
+            "overall_conversion": kpis['overall_conversion'],
+            "target_conversion": kpis['target_conversion'],
+            "gap": kpis['conversion_gap'],
+            "status": "ON_TRACK" if kpis['conversion_gap'] <= 5 else "NEEDS_ATTENTION" if kpis['conversion_gap'] <= 15 else "CRITICAL"
+          },
+          "recommendations": []
+        }
+
+        # Recommandations basées sur les données
+        if kpis['overall_conversion'] < 20:
+          report["recommendations"].append({
+            "priority": "HIGH",
+            "area": "ICP",
+            "action": "Tighten ICP criteria - current conversion too low",
+            "details": "Focus on top 3 success patterns: " + str(success_patterns[:3])
+          })
+
+        if kpis['email_reply_rate'] < 15:
+          report["recommendations"].append({
+            "priority": "HIGH",
+            "area": "PERSONALIZATION",
+            "action": "Improve email personalization quality",
+            "details": "Current reply rate below target. Review templates and research depth."
+          })
+
+        # Recommandations séquences
+        best_sequence = max(sequence_performance, key=lambda x: x['reply_rate']) if sequence_performance else None
+        worst_sequence = min(sequence_performance, key=lambda x: x['reply_rate']) if sequence_performance else None
+
+        if best_sequence and worst_sequence:
+          report["recommendations"].append({
+            "priority": "MEDIUM",
+            "area": "SEQUENCES",
+            "action": f"Scale {best_sequence['sequence_name']} (reply rate: {best_sequence['reply_rate']}%), review {worst_sequence['sequence_name']} (reply rate: {worst_sequence['reply_rate']}%)"
+          })
+
+        # Recommandations sources
+        best_source = max(success_patterns, key=lambda x: x['win_rate']) if success_patterns else None
+        if best_source:
+          report["recommendations"].append({
+            "priority": "MEDIUM",
+            "area": "SOURCES",
+            "action": f"Increase focus on {best_source['source']} (win rate: {best_source['win_rate']}%)"
+          })
+
+        return report
+      output: "optimization_report"
+
+    # --- Étape 8: Application auto-ajustements (si validé) ---
+    - id: "auto_adjustments"
+      name: "Apply Auto-Adjustments"
+      action: "conditional"
+      condition: "{{optimization_report.summary.status}} == 'CRITICAL'"
+      then:
+        - action: "adjust_icp_weights"
+          tool: "icp_engine"
+          method: "update_weights"
+          params:
+            source: "{{optimization_report.recommendations}}"
+            adjustment_factor: 0.1
+
+        - action: "adjust_sequence_timing"
+          tool: "sequence_engine"
+          method: "update_timing"
+          params:
+            based_on: "{{sequence_performance}}"
+
+        - action: "adjust_discovery_focus"
+          tool: "discovery_engine"
+          method: "update_sources"
+          params:
+            prioritize: "{{success_patterns[:3]}}"
+            deprioritize: "{{failure_patterns[:3]}}"
+
+      else:
+        - action: "log_optimization"
+          message: "Performance within acceptable range. No critical adjustments needed."
+
+    # --- Étape 9: Envoi rapport quotidien ---
+    - id: "send_daily_report"
+      name: "Send Daily Performance Report"
+      action: "send_notification"
+      channel: "slack"
+      message: |
+        📊 RAPPORT QUOTIDIEN - Agent Commercial Autonome
+
+        Date: {{now}}
+
+        🎯 KPIs:
+        • Conversion globale: {{kpis.overall_conversion}}% (Target: {{kpis.target_conversion}}%)
+        • Taux de réponse: {{kpis.email_reply_rate}}% (Target: {{kpis.target_reply_rate}}%)
+        • Score intent moyen: {{kpis.avg_intent_score}}/100
+        • Score fit moyen: {{kpis.avg_fit_score}}/100
+
+        📈 Top Patterns Succès:
+        {% for pattern in success_patterns[:3] %}
+        • {{pattern.source}} | {{pattern.naf_code}} | {{pattern.city}} | Win rate: {{pattern.win_rate}}%
+        {% endfor %}
+
+        ⚠️ Patterns à surveiller:
+        {% for pattern in failure_patterns[:3] %}
+        • {{pattern.source}} | {{pattern.naf_code}} | {{pattern.city}} | Loss rate: {{pattern.loss_rate}}%
+        {% endfor %}
+
+        🔧 Recommandations:
+        {% for rec in optimization_report.recommendations %}
+        [{{rec.priority}}] {{rec.area}}: {{rec.action}}
+        {% endfor %}
+
+        Status: {{optimization_report.summary.status}}
+      output: "daily_report"
+
+    # --- Étape 10: Vérification cohérence base ---
+    - id: "database_consistency_check"
+      name: "Database Consistency Check"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        -- Vérifier incohérences
+        SELECT 
+          'orphan_interactions' as check_name,
+          COUNT(*) as count
+        FROM interactions i
+        LEFT JOIN prospects p ON i.prospect_id = p.id
+        WHERE p.id IS NULL
+
+        UNION ALL
+
+        SELECT 
+          'duplicate_sirets' as check_name,
+          COUNT(*) as count
+        FROM (
+          SELECT siret, COUNT(*) as cnt
+          FROM prospects
+          WHERE siret IS NOT NULL
+          GROUP BY siret
+          HAVING COUNT(*) > 1
+        ) d
+
+        UNION ALL
+
+        SELECT 
+          'invalid_scores' as check_name,
+          COUNT(*) as count
+        FROM prospects
+        WHERE (intent_score < 0 OR intent_score > 100)
+           OR (fit_score < 0 OR fit_score > 100)
+           OR (priority_score < 0 OR priority_score > 100)
+
+        UNION ALL
+
+        SELECT 
+          'stale_hot_leads' as check_name,
+          COUNT(*) as count
+        FROM prospects
+        WHERE status = 'hot_lead'
+        AND last_contact_date < NOW() - INTERVAL '7 days'
+        AND next_action_date < NOW()
+      output: "consistency_checks"
+
+    - id: "fix_inconsistencies"
+      name: "Fix Inconsistencies"
+      action: "conditional"
+      foreach: "{{consistency_checks}}"
+      condition: "item.count > 0"
+      then:
+        - action: "log_warning"
+          message: "{{item.check_name}}: {{item.count}} issues found"
+
+        - action: "execute_sql"
+          tool: "google_toolbox_postgres"
+          query: |
+            {% if item.check_name == 'orphan_interactions' %}
+            DELETE FROM interactions WHERE prospect_id NOT IN (SELECT id FROM prospects)
+            {% elif item.check_name == 'duplicate_sirets' %}
+            -- Flag duplicates for manual review
+            UPDATE prospects p1
+            SET is_duplicated = TRUE,
+                duplicate_of = p2.id
+            FROM prospects p2
+            WHERE p1.siret = p2.siret
+            AND p1.id > p2.id
+            AND p1.siret IS NOT NULL
+            {% elif item.check_name == 'invalid_scores' %}
+            UPDATE prospects
+            SET intent_score = GREATEST(0, LEAST(100, intent_score)),
+                fit_score = GREATEST(0, LEAST(100, fit_score)),
+                priority_score = GREATEST(0, LEAST(100, priority_score))
+            WHERE intent_score < 0 OR intent_score > 100
+               OR fit_score < 0 OR fit_score > 100
+               OR priority_score < 0 OR priority_score > 100
+            {% elif item.check_name == 'stale_hot_leads' %}
+            UPDATE prospects
+            SET status = 'nurture',
+                next_action_date = NOW() + INTERVAL '30 days',
+                notes = COALESCE(notes, '') || ' | Auto-downgraded: stale hot lead'
+            WHERE status = 'hot_lead'
+            AND last_contact_date < NOW() - INTERVAL '7 days'
+            AND next_action_date < NOW()
+            {% endif %}
+      output: "fix_results"
+
+    # --- Étape 11: Logging final ---
+    - id: "log_feedback"
+      name: "Log Feedback Loop Results"
+      action: "log_end"
+      params:
+        workflow_id: "07_feedback_loop"
+        overall_conversion: "{{kpis.overall_conversion}}"
+        reply_rate: "{{kpis.email_reply_rate}}"
+        status: "{{optimization_report.summary.status}}"
+        recommendations_count: "{{optimization_report.recommendations | length}}"
+        inconsistencies_found: "{{consistency_checks | sum(attribute='count')}}"
+        inconsistencies_fixed: "{{fix_results | sum(attribute='count')}}"
+
+  error_handling:
+    - condition: "database_query_error"
+      action: "retry"
+      max_retries: 2
+
+    - condition: "report_generation_error"
+      action: "fallback"
+      message: "Generate simplified report"
+
+    - condition: "auto_adjustment_error"
+      action: "alert"
+      message: "Auto-adjustment failed - manual review required"
+
+  metrics:
+    - overall_conversion_rate
+    - reply_rate
+    - meeting_booking_rate
+    - win_rate
+    - recommendations_generated
+    - inconsistencies_detected
+    - inconsistencies_fixed
+    - report_delivery_rate

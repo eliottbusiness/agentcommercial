@@ -1,0 +1,575 @@
+# ============================================
+# AGENT CONFIG - Commercial Autonome
+# Version: 1.0 | Objectif: 1 prospect = 1 client
+# Philosophie: Qualité > Quantité | Signaux d'intention > Cold outreach
+# ============================================
+
+agent:
+  name: "Agent Commercial Autonome"
+  version: "1.0.0"
+  objective: "Trouver, enrichir et convertir des prospects qualifiés via signaux d'intention"
+
+  # Mode de fonctionnement
+  mode: "autonomous_with_human_gates"
+  # autonomous: agent décide et exécute
+  # human_gates: validation humaine avant actions critiques (envoi email, RDV)
+
+  human_gates:
+    - action: "send_first_email"
+      condition: "prospect.priority_score >= 85"
+      approval_required: true
+      timeout_hours: 24
+
+    - action: "book_meeting"
+      condition: "prospect.status = 'hot_lead' AND prospect.intent_score >= 90"
+      approval_required: true
+      timeout_hours: 12
+
+    - action: "auto_enrichment"
+      condition: "all_prospects"
+      approval_required: false
+
+    - action: "signal_detection"
+      condition: "all_sources"
+      approval_required: false
+
+# ============================================
+# ICP (IDEAL CUSTOMER PROFILE)
+# ============================================
+
+icp:
+  name: "PME Tech & Digital France"
+  description: "Petites et moyennes entreprises du secteur tech/digital en croissance"
+
+  firmographics:
+    sectors:
+      naf_codes: ["62.01Z", "62.02A", "62.03Z", "63.11Z", "63.12Z", "58.29Z", "61.10Z", "71.12Z"]
+      labels: ["Développement logiciel", "Conseil IT", "Hébergement", "Editeur logiciel", "Agence web"]
+
+    size:
+      employees: { min: 10, max: 250, ideal: "20-100" }
+      revenue: { min_eur: 500000, max_eur: 50000000, ideal_eur: "2M-20M" }
+
+    location:
+      countries: ["FR"]
+      regions_priority: ["Île-de-France", "Auvergne-Rhône-Alpes", "Provence-Alpes-Côte d'Azur", "Occitanie"]
+      cities: ["Paris", "Lyon", "Marseille", "Toulouse", "Bordeaux", "Nantes", "Strasbourg", "Lille"]
+
+    legal_forms: ["SAS", "SARL", "SA", "SASU", "EURL"]
+
+    maturity:
+      creation_date: { min_years: 2, max_years: 15 }
+      # Ni trop jeune (pas de budget), ni trop vieille (pas de besoin de transformation)
+
+  technographics:
+    stack_indicators:
+      - "React"
+      - "Node.js"
+      - "Python"
+      - "AWS"
+      - "Docker"
+      - "Kubernetes"
+      - "PostgreSQL"
+      - "MongoDB"
+
+    website_signals:
+      - "careers page active"
+      - "blog technique"
+      - "API documentation"
+      - "cloud-native architecture"
+
+  psychographics:
+    pain_points:
+      - "scaling infrastructure"
+      - "digital transformation"
+      - "automation manuelle"
+      - "data pipeline"
+      - "dette technique"
+      - "recrutement tech"
+
+    growth_signals:
+      - "levée de fonds récente"
+      - "recrutement massif"
+      - "ouverture nouveaux bureaux"
+      - "lancement nouveau produit"
+      - "expansion internationale"
+
+    buying_signals:
+      - "job posting senior tech"
+      - "recherche prestataire"
+      - "mention budget IT"
+      - "plainte outil actuel"
+      - "changement CTO/Directeur technique"
+
+# ============================================
+# SOURCES DE SIGNAUX D'INTENTION
+# ============================================
+
+intent_sources:
+  # --- Source 1: Twitter/X (via Agent Reach) ---
+  twitter:
+    enabled: true
+    tool: "agent_reach_twitter"
+    search_queries:
+      - "recrute développeur Paris"
+      - "cherche prestataire tech"
+      - "problème infrastructure"
+      - "migration cloud"
+      - "levée fonds startup"
+
+    signal_types:
+      - type: "hiring_spree"
+        pattern: "recrute.*développeur|hiring.*engineer|on recherche.*tech"
+        weight: 7
+
+      - type: "pain_point_mention"
+        pattern: "galère.*infra|problème.*scaling|bug.*production|lent.*API"
+        weight: 9
+
+      - type: "budget_mention"
+        pattern: "budget.*2026|investissement.*tech|nouveau.*outil"
+        weight: 8
+
+      - type: "decision_maker_change"
+        pattern: "nouveau.*CTO|rejoint.*tech lead|promu.*directeur technique"
+        weight: 6
+
+    rate_limit: "150 calls/day (Exa free) / Twitter via cookie (illimité mais risque ban)"
+
+  # --- Source 2: Reddit (via Agent Reach) ---
+  reddit:
+    enabled: true
+    tool: "agent_reach_reddit"
+    subreddits:
+      - "r/france"
+      - "r/entrepreneur"
+      - "r/webdev"
+      - "r/sysadmin"
+      - "r/startups"
+
+    signal_types:
+      - type: "pain_point_mention"
+        pattern: "recommandation.*hébergeur|quelle.*solution.*cloud|besoin.*automatiser"
+        weight: 9
+
+      - type: "budget_mention"
+        pattern: "budget.*développement|coût.*serveur|devis.*prestation"
+        weight: 8
+
+    rate_limit: "Via cookie Reddit - usage raisonnable"
+
+  # --- Source 3: Job Boards (via Exa Search) ---
+  job_boards:
+    enabled: true
+    tool: "exa_search"
+    queries:
+      - "site:linkedin.com/jobs "développeur" "Paris" "SAS" "startup""
+      - "site:indeed.fr "architecte cloud" "Lyon" "PME""
+      - "site:welcometothejungle.com "tech lead" "full remote" "SaaS""
+
+    signal_types:
+      - type: "hiring_spree"
+        weight: 7
+
+      - type: "tech_stack_change"
+        weight: 6
+
+    rate_limit: "150 calls/day (Exa free unauthenticated)"
+
+  # --- Source 4: SIRENE API / DataGouv (MCP) ---
+  sirene_api:
+    enabled: true
+    tool: "datagouv_mcp"
+    endpoints:
+      - "api.insee.fr/entreprises/sirene/V3"
+      - "data.inpi.fr"
+
+    signal_types:
+      - type: "company_creation"
+        query: "new_companies_last_30_days"
+        weight: 4
+
+      - type: "capital_increase"
+        query: "capital_changes_recent"
+        weight: 8
+
+      - type: "director_change"
+        query: "mandataire_changes"
+        weight: 6
+
+    rate_limit: "30 req/min (INSEE free)"
+
+  # --- Source 5: Overpass API / OpenStreetMap ---
+  overpass_osm:
+    enabled: true
+    tool: "overpass_api"
+
+    # Détection d'expansion physique (nouveaux bureaux)
+    queries:
+      - amenity: "office"
+        new_in_area: "last_90_days"
+        weight: 5
+
+    rate_limit: "~10 000/day (usage raisonnable)"
+
+  # --- Source 6: GitHub (via Agent Reach) ---
+  github:
+    enabled: true
+    tool: "agent_reach_github"
+
+    signal_types:
+      - type: "tech_stack_change"
+        pattern: "new repo.*microservices|migration.*kubernetes|refactor.*architecture"
+        weight: 6
+
+      - type: "hiring_spree"
+        pattern: "contributors.*+10|new team.*backend"
+        weight: 5
+
+    rate_limit: "GitHub API: 5000 req/hour (authentifié)"
+
+  # --- Source 7: Exa Company Search ---
+  exa_company:
+    enabled: true
+    tool: "exa_company_search"
+
+    signal_types:
+      - type: "funding_announcement"
+        weight: 10
+
+      - type: "expansion"
+        weight: 8
+
+      - type: "product_launch"
+        weight: 7
+
+    rate_limit: "150 calls/day (free tier)"
+
+# ============================================
+# ALGORITHME DE SCORING
+# ============================================
+
+scoring:
+  # Score d'intention (0-100): probabilité d'achat immédiat
+  intent_score:
+    components:
+      signals_strength:
+        weight: 0.40
+        calculation: "SUM(signal.impact_score * signal.confidence) / MAX_SIGNALS"
+
+      recency:
+        weight: 0.25
+        calculation: "decay_function(days_since_last_signal, half_life=7_days)"
+
+      signal_diversity:
+        weight: 0.20
+        calculation: "unique_signal_types / total_possible_types"
+
+      engagement_level:
+        weight: 0.15
+        calculation: "website_visits + email_opens + content_downloads"
+
+    thresholds:
+      cold: { min: 0, max: 40, action: "nurture" }
+      warm: { min: 41, max: 69, action: "light_touch" }
+      hot: { min: 70, max: 84, action: "personalized_outreach" }
+      super_hot: { min: 85, max: 100, action: "immediate_outreach_urgent" }
+
+  # Score de fit (0-100): alignement avec ICP
+  fit_score:
+    components:
+      sector_match:
+        weight: 0.25
+        calculation: "exact_naf_match ? 100 : related_sector ? 60 : 0"
+
+      size_match:
+        weight: 0.20
+        calculation: "gaussian(ideal_size, actual_size, std_dev=20%)"
+
+      location_match:
+        weight: 0.15
+        calculation: "priority_region ? 100 : france ? 70 : 0"
+
+      tech_stack_match:
+        weight: 0.20
+        calculation: "matching_technologies / ideal_technologies * 100"
+
+      pain_point_match:
+        weight: 0.20
+        calculation: "identified_pain_points / target_pain_points * 100"
+
+    thresholds:
+      poor_fit: { min: 0, max: 40, action: "discard" }
+      moderate_fit: { min: 41, max: 60, action: "low_priority" }
+      good_fit: { min: 61, max: 80, action: "standard_process" }
+      perfect_fit: { min: 81, max: 100, action: "priority_process" }
+
+  # Score priorité composite
+  priority_score:
+    formula: "intent_score * 0.6 + fit_score * 0.4"
+
+    daily_quota:
+      max_outreach: 10  # Max 10 contacts qualifiés/jour (qualité > quantité)
+      max_discovery: 50  # Max 50 nouveaux prospects découverts/jour
+      max_enrichment: 100  # Max 100 enrichissements/jour
+
+# ============================================
+# STRATÉGIE D'OUTREACH
+# ============================================
+
+outreach:
+  philosophy: "1 prospect = 1 client"
+
+  sequences:
+    # Séquence 1: Super Hot (score >= 85)
+    super_hot_sequence:
+      trigger: "priority_score >= 85 AND intent_score >= 85"
+      steps:
+        - step: 1
+          delay_hours: 0
+          channel: "email"
+          type: "hyper_personalized"
+          template: "super_hot_first_touch"
+          research_depth: "deep"
+          # Recherche approfondie: site web, LinkedIn, Twitter, GitHub, actualités
+
+        - step: 2
+          delay_hours: 48
+          channel: "linkedin"
+          type: "connection_request"
+          note: "personalized_value_prop"
+
+        - step: 3
+          delay_hours: 96
+          channel: "email"
+          type: "follow_up_value"
+          condition: "no_reply_to_step_1"
+
+        - step: 4
+          delay_hours: 168
+          channel: "email"
+          type: "case_study"
+          condition: "no_reply_to_step_3"
+
+        - step: 5
+          delay_hours: 336
+          channel: "linkedin"
+          type: "soft_touch"
+          condition: "no_reply_to_step_4"
+          # Dernier essai, puis nurture
+
+    # Séquence 2: Hot (score 70-84)
+    hot_sequence:
+      trigger: "priority_score >= 70 AND priority_score < 85"
+      steps:
+        - step: 1
+          delay_hours: 0
+          channel: "email"
+          type: "personalized"
+          template: "hot_first_touch"
+          research_depth: "medium"
+
+        - step: 2
+          delay_hours: 72
+          channel: "email"
+          type: "follow_up"
+          condition: "no_reply"
+
+        - step: 3
+          delay_hours: 168
+          channel: "linkedin"
+          type: "connection"
+          condition: "no_reply"
+
+        - step: 4
+          delay_hours: 336
+          channel: "email"
+          type: "value_content"
+          condition: "no_reply"
+
+    # Séquence 3: Warm (score 41-69)
+    warm_sequence:
+      trigger: "priority_score >= 41 AND priority_score < 70"
+      steps:
+        - step: 1
+          delay_hours: 0
+          channel: "email"
+          type: "educational"
+          template: "warm_first_touch"
+
+        - step: 2
+          delay_hours: 168
+          channel: "email"
+          type: "content_share"
+          condition: "no_reply"
+
+        - step: 3
+          delay_hours: 336
+          channel: "linkedin"
+          type: "connection"
+          condition: "no_reply"
+
+    # Séquence 4: Nurture (score < 40)
+    nurture_sequence:
+      trigger: "priority_score < 41"
+      steps:
+        - step: 1
+          delay_hours: 0
+          channel: "newsletter"
+          type: "subscribe"
+
+        - step: 2
+          delay_hours: 720  # 30 jours
+          channel: "email"
+          type: "re_engagement"
+          condition: "no_engagement"
+
+  personalization:
+    # Niveaux de personnalisation selon score
+    super_hot:
+      research_sources: ["website", "linkedin", "twitter", "github", "press", "job_boards"]
+      elements:
+        - "mention_specific_project"
+        - "reference_recent_news"
+        - "cite_mutual_connection"
+        - "address_exact_pain_point"
+        - "propose_specific_solution"
+
+    hot:
+      research_sources: ["website", "linkedin", "twitter"]
+      elements:
+        - "reference_company_growth"
+        - "mention_sector_trend"
+        - "propose_relevant_case_study"
+
+    warm:
+      research_sources: ["website", "linkedin"]
+      elements:
+        - "sector_insight"
+        - "educational_content"
+
+# ============================================
+# BOUCLE D'AUTO-VÉRIFICATION
+# ============================================
+
+verification:
+  enabled: true
+  frequency: "before_every_critical_action"
+
+  checks:
+    # Vérification 1: Cohérence données
+    data_integrity:
+      - check: "prospect.siret IS NOT NULL AND LENGTH(prospect.siret) = 14"
+        action_on_fail: "re_enrich_via_sirene_api"
+
+      - check: "prospect.company_name IS NOT NULL AND LENGTH(prospect.company_name) > 2"
+        action_on_fail: "flag_for_manual_review"
+
+      - check: "prospect.intent_score >= 0 AND prospect.intent_score <= 100"
+        action_on_fail: "recalculate_score"
+
+      - check: "prospect.status IN valid_status_list"
+        action_on_fail: "reset_to_discovered"
+
+    # Vérification 2: Non-duplication
+    deduplication:
+      - check: "SELECT COUNT(*) FROM prospects WHERE siret = $siret = 1"
+        action_on_fail: "merge_duplicates_or_flag"
+
+      - check: "SELECT COUNT(*) FROM prospects WHERE company_name ILIKE $name AND city = $city = 1"
+        action_on_fail: "manual_review_similar"
+
+    # Vérification 3: Qualité outreach
+    outreach_quality:
+      - check: "email_content.personalization_score >= 0.7"
+        action_on_fail: "regenerate_with_more_research"
+
+      - check: "email_content.spam_score < 0.3"
+        action_on_fail: "rewrite_to_avoid_spam"
+
+      - check: "email_content.length BETWEEN 100 AND 500"
+        action_on_fail: "adjust_length"
+
+    # Vérification 4: Cohérence séquence
+    sequence_coherence:
+      - check: "previous_step.completed = true"
+        action_on_fail: "wait_or_skip"
+
+      - check: "prospect.status matches sequence_stage"
+        action_on_fail: "update_status_or_abort"
+
+      - check: "no_duplicate_email_in_7_days"
+        action_on_fail: "abort_and_log"
+
+    # Vérification 5: Signaux récents
+    signal_freshness:
+      - check: "last_signal_date < 30_days"
+        action_on_fail: "refresh_signals_or_deprioritize"
+
+      - check: "signal_confidence >= 0.6"
+        action_on_fail: "seek_additional_signals"
+
+  # Log de vérification
+  verification_log:
+    table: "verification_logs"
+    fields:
+      - check_name
+      - check_type
+      - result
+      - action_taken
+      - timestamp
+      - prospect_id
+      - agent_version
+
+# ============================================
+# MÉTRIQUES & KPIs
+# ============================================
+
+metrics:
+  # Objectif principal: 1 prospect = 1 client
+  primary_kpi:
+    name: "conversion_rate"
+    target: ">= 30%"  # 30% des prospects qualifiés deviennent clients
+    calculation: "won / (discovered + enriched + qualified + hot_lead + contacted + responded + meeting_booked + proposal_sent + negotiation + won + lost)"
+
+  secondary_kpis:
+    - name: "discovery_to_meeting_rate"
+      target: ">= 15%"
+
+    - name: "meeting_to_proposal_rate"
+      target: ">= 60%"
+
+    - name: "proposal_to_won_rate"
+      target: ">= 50%"
+
+    - name: "average_deal_size"
+      target: "track_and_optimize"
+
+    - name: "cost_per_acquisition"
+      target: "minimize"
+
+    - name: "signal_to_prospect_time"
+      target: "< 24 hours"
+
+    - name: "enrichment_completeness"
+      target: ">= 80%"
+
+    - name: "email_reply_rate"
+      target: ">= 25%"
+
+    - name: "meeting_show_rate"
+      target: ">= 80%"
+
+  # Alertes
+  alerts:
+    - condition: "conversion_rate < 20%"
+      action: "review_icp_and_signals"
+
+    - condition: "email_reply_rate < 15%"
+      action: "review_personalization_quality"
+
+    - condition: "no_new_signals_24h"
+      action: "expand_signal_sources"
+
+    - condition: "prospect_queue_empty"
+      action: "intensify_discovery"

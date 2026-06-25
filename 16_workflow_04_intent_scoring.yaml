@@ -1,0 +1,286 @@
+# ============================================
+# WORKFLOW 04: Intent Scoring Engine
+# Version: 1.0 | Agent Commercial Autonome
+# Trigger: Toutes les heures (cron: 0 * * * *)
+# ============================================
+
+workflow:
+  name: "Intent Scoring Engine"
+  id: "04_intent_scoring"
+  version: "1.0.0"
+
+  trigger:
+    type: "scheduled"
+    cron: "0 * * * *"  # Toutes les heures
+
+  description: >
+    Recalcule les scores d'intention, fit et priorité pour tous les prospects
+    avec de nouveaux signaux ou interactions. Met à jour les statuts pipeline.
+
+  steps:
+    # --- Étape 1: Récupération prospects à scorer ---
+    - id: "fetch_to_score"
+      name: "Fetch Prospects to Score"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          p.id, p.siren, p.siret, p.company_name, p.naf_code, p.city,
+          p.employee_count_band, p.website, p.status,
+          p.intent_score as current_intent,
+          p.fit_score as current_fit,
+          p.priority_score as current_priority
+        FROM prospects p
+        WHERE p.is_duplicated = FALSE
+        AND (
+          p.updated_at > NOW() - INTERVAL '1 hour'
+          OR p.last_enrichment_date > NOW() - INTERVAL '1 hour'
+          OR EXISTS (
+            SELECT 1 FROM intent_signals s 
+            WHERE s.prospect_id = p.id 
+            AND s.discovered_at > NOW() - INTERVAL '1 hour'
+          )
+          OR EXISTS (
+            SELECT 1 FROM interactions i 
+            WHERE i.prospect_id = p.id 
+            AND i.created_at > NOW() - INTERVAL '1 hour'
+          )
+        )
+        ORDER BY p.updated_at DESC
+        LIMIT 200
+      output: "prospects_to_score"
+
+    # --- Étape 2: Calcul Intent Score ---
+    - id: "calculate_intent"
+      name: "Calculate Intent Scores"
+      action: "for_each"
+      foreach: "{{prospects_to_score}}"
+      tool: "scoring_engine"
+      method: "calculate_intent_score"
+      params:
+        prospect_id: "{{item.id}}"
+        components:
+          signals_strength:
+            weight: 0.40
+            query: |
+              SELECT 
+                SUM(s.impact_score * s.confidence_score * (0.5 ^ (EXTRACT(DAY FROM (NOW() - s.discovered_at)) / 7))) as weighted_impact,
+                COUNT(*) * 10 as max_possible
+              FROM intent_signals s
+              WHERE s.prospect_id = '{{item.id}}'
+              AND s.is_processed = TRUE
+
+          recency:
+            weight: 0.25
+            query: |
+              SELECT 
+                CASE 
+                  WHEN MAX(s.discovered_at) IS NULL THEN 0
+                  WHEN EXTRACT(DAY FROM (NOW() - MAX(s.discovered_at))) <= 0 THEN 100
+                  WHEN EXTRACT(DAY FROM (NOW() - MAX(s.discovered_at))) <= 7 THEN 100 - (EXTRACT(DAY FROM (NOW() - MAX(s.discovered_at))) * 7.14)
+                  WHEN EXTRACT(DAY FROM (NOW() - MAX(s.discovered_at))) <= 30 THEN 50 - ((EXTRACT(DAY FROM (NOW() - MAX(s.discovered_at))) - 7) * 1.74)
+                  WHEN EXTRACT(DAY FROM (NOW() - MAX(s.discovered_at))) <= 90 THEN 10 - ((EXTRACT(DAY FROM (NOW() - MAX(s.discovered_at))) - 30) * 0.17)
+                  ELSE 0
+                END as recency_score
+              FROM intent_signals s
+              WHERE s.prospect_id = '{{item.id}}'
+
+          diversity:
+            weight: 0.20
+            query: |
+              SELECT 
+                (COUNT(DISTINCT s.signal_type)::numeric / 10 * 100) +
+                CASE WHEN COUNT(DISTINCT s.signal_type) FILTER (WHERE s.signal_type IN ('funding', 'hiring')) = 2 THEN 10 ELSE 0 END +
+                CASE WHEN COUNT(DISTINCT s.signal_type) FILTER (WHERE s.signal_type IN ('pain', 'budget')) = 2 THEN 10 ELSE 0 END +
+                CASE WHEN COUNT(DISTINCT s.signal_type) FILTER (WHERE s.signal_type IN ('hiring', 'tech_change')) = 2 THEN 10 ELSE 0 END
+                as diversity_score
+              FROM intent_signals s
+              WHERE s.prospect_id = '{{item.id}}'
+
+          engagement:
+            weight: 0.15
+            query: |
+              SELECT 
+                LEAST(100,
+                  COUNT(*) FILTER (WHERE i.interaction_type = 'email_opened') * 10 +
+                  COUNT(*) FILTER (WHERE i.interaction_type = 'email_replied') * 25 +
+                  COUNT(*) FILTER (WHERE i.interaction_type = 'link_clicked') * 15 +
+                  COUNT(*) FILTER (WHERE i.interaction_type = 'website_visit') * 10 +
+                  COUNT(*) FILTER (WHERE i.interaction_type = 'meeting_booked') * 50
+                ) as engagement_score
+              FROM interactions i
+              WHERE i.prospect_id = '{{item.id}}'
+              AND i.created_at > NOW() - INTERVAL '30 days'
+      output: "intent_scores"
+
+    # --- Étape 3: Calcul Fit Score ---
+    - id: "calculate_fit"
+      name: "Calculate Fit Scores"
+      action: "for_each"
+      foreach: "{{prospects_to_score}}"
+      tool: "scoring_engine"
+      method: "calculate_fit_score"
+      params:
+        prospect_id: "{{item.id}}"
+        components:
+          sector_match:
+            weight: 0.25
+            query: |
+              SELECT CASE 
+                WHEN p.naf_code IN ('62.01Z', '62.02A', '62.03Z', '63.11Z', '63.12Z', '58.29Z', '61.10Z', '71.12Z') THEN 100
+                WHEN p.naf_code IN ('70.10Z', '71.11Z', '62.09Z', '63.99Z') THEN 70
+                ELSE 30
+              END as sector_score
+              FROM prospects p WHERE p.id = '{{item.id}}'
+
+          size_match:
+            weight: 0.20
+            query: |
+              SELECT CASE 
+                WHEN p.employee_count_band IS NULL THEN 50
+                WHEN p.employee_count_band IN ('21', '22', '31', '32') THEN 100
+                WHEN p.employee_count_band IN ('11', '12', '41', '42') THEN 80
+                WHEN p.employee_count_band IN ('01', '02', '03', '04', '05', '06') THEN 40
+                ELSE 60
+              END as size_score
+              FROM prospects p WHERE p.id = '{{item.id}}'
+
+          location_match:
+            weight: 0.15
+            query: |
+              SELECT CASE 
+                WHEN p.city IN ('Paris', 'Lyon', 'Marseille', 'Toulouse', 'Bordeaux', 'Nantes') THEN 100
+                WHEN p.region IN ('Île-de-France', 'Auvergne-Rhône-Alpes', 'Provence-Alpes-Côte d'Azur') THEN 85
+                WHEN p.department_code IN ('75', '69', '13', '31', '33', '44', '67', '59') THEN 80
+                ELSE 50
+              END as location_score
+              FROM prospects p WHERE p.id = '{{item.id}}'
+
+          tech_match:
+            weight: 0.20
+            query: |
+              SELECT 
+                LEAST(100, 
+                  (SELECT COUNT(*) FROM jsonb_array_elements_text(p.intent_signals->'tech_stack') t 
+                   WHERE t.value IN ('React', 'Node.js', 'Python', 'AWS', 'Docker', 'Kubernetes', 'PostgreSQL'))::numeric / 7 * 100 + 20
+                ) as tech_score
+              FROM prospects p WHERE p.id = '{{item.id}}'
+
+          pain_match:
+            weight: 0.20
+            query: |
+              SELECT 
+                LEAST(100,
+                  (SELECT COUNT(*) FROM jsonb_array_elements_text(p.intent_signals->'pain_points') t 
+                   WHERE t.value IN ('scaling', 'digital_transformation', 'automation', 'data_pipeline', 'dette_technique', 'recrutement_tech'))::numeric / 6 * 100 + 10
+                ) as pain_score
+              FROM prospects p WHERE p.id = '{{item.id}}'
+      output: "fit_scores"
+
+    # --- Étape 4: Calcul Priority Score ---
+    - id: "calculate_priority"
+      name: "Calculate Priority Scores"
+      action: "for_each"
+      foreach: "{{prospects_to_score}}"
+      tool: "scoring_engine"
+      method: "calculate_priority"
+      formula: "intent_score * 0.60 + fit_score * 0.40"
+      output: "priority_scores"
+
+    # --- Étape 5: Mise à jour statuts ---
+    - id: "update_statuses"
+      name: "Update Prospect Statuses"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        UPDATE prospects p
+        SET 
+          intent_score = s.intent_score,
+          fit_score = s.fit_score,
+          priority_score = s.priority_score,
+          status = CASE 
+            WHEN s.priority_score >= 85 AND s.intent_score >= 85 THEN 'hot_lead'
+            WHEN s.priority_score >= 70 AND s.intent_score >= 70 THEN 'qualified'
+            WHEN s.priority_score >= 41 THEN 'enriched'
+            ELSE 'nurture'
+          END,
+          updated_at = NOW()
+        FROM (
+          SELECT 
+            prospect_id,
+            intent_score,
+            fit_score,
+            (intent_score * 0.60 + fit_score * 0.40)::INTEGER as priority_score
+          FROM {{intent_scores}}
+          JOIN {{fit_scores}} USING (prospect_id)
+        ) s
+        WHERE p.id = s.prospect_id
+        AND p.is_duplicated = FALSE
+      output: "status_updates"
+
+    # --- Étape 6: Détection nouveaux hot leads ---
+    - id: "detect_hot_leads"
+      name: "Detect New Hot Leads"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          p.id, p.company_name, p.city, p.intent_score, p.fit_score, p.priority_score,
+          p.decision_maker_name, p.decision_maker_title, p.contact_email,
+          jsonb_agg(s.signal_type) as signals
+        FROM prospects p
+        JOIN intent_signals s ON p.id = s.prospect_id
+        WHERE p.status = 'hot_lead'
+        AND p.updated_at > NOW() - INTERVAL '1 hour'
+        AND p.is_duplicated = FALSE
+        GROUP BY p.id
+        ORDER BY p.priority_score DESC
+      output: "new_hot_leads"
+
+    # --- Étape 7: Notification hot leads ---
+    - id: "notify_hot_leads"
+      name: "Notify New Hot Leads"
+      action: "conditional"
+      condition: "{{new_hot_leads.count}} > 0"
+      then:
+        - action: "send_notification"
+          channel: "slack"
+          message: |
+            🔥 {{new_hot_leads.count}} NOUVEAUX HOT LEADS
+
+            {% for lead in new_hot_leads %}
+            • {{lead.company_name}} ({{lead.city}}) - Score: {{lead.priority_score}}/100
+              Décideur: {{lead.decision_maker_name}} ({{lead.decision_maker_title}})
+              Signaux: {{lead.signals}}
+            {% endfor %}
+
+            Action: Préparer outreach immédiat (Workflow 05)
+
+    # --- Étape 8: Logging ---
+    - id: "log_scoring"
+      name: "Log Scoring Results"
+      action: "log_end"
+      params:
+        workflow_id: "04_intent_scoring"
+        prospects_scored: "{{prospects_to_score.count}}"
+        new_hot_leads: "{{new_hot_leads.count}}"
+        avg_intent_score: "{{intent_scores.avg}}"
+        avg_fit_score: "{{fit_scores.avg}}"
+        avg_priority_score: "{{priority_scores.avg}}"
+
+  error_handling:
+    - condition: "scoring_calculation_error"
+      action: "retry"
+      max_retries: 2
+
+    - condition: "database_update_error"
+      action: "rollback"
+      message: "Failed to update scores, rolling back"
+
+  metrics:
+    - prospects_scored_per_run
+    - new_hot_leads_generated
+    - average_intent_score
+    - average_fit_score
+    - average_priority_score
+    - scoring_accuracy (vs manual review)

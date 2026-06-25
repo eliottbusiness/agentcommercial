@@ -1,0 +1,296 @@
+# tools.yaml - Configuration Google MCP Toolbox for Databases
+# Connecte l'agent à Supabase PostgreSQL pour le CRM prospecting
+# Version: 1.0 | Stack: 100% gratuite
+
+# ============================================
+# SOURCE: Supabase PostgreSQL (Free Tier)
+# Limites: 500MB DB, 50K MAU, 5GB egress, 2 projets actifs
+# ============================================
+kind: source
+name: supabase-prospects-db
+type: postgres
+host: ${SUPABASE_HOST}
+port: 5432
+database: postgres
+user: postgres
+password: ${SUPABASE_PASSWORD}
+ssl_mode: require
+
+# ============================================
+# OUTILS PRÉDÉFINIS - PROSPECTION COMMERCIALE
+# ============================================
+
+# --- Outil 1: Recherche prospects par critères ---
+kind: tool
+name: search_prospects_by_criteria
+type: postgres-sql
+source: supabase-prospects-db
+description: >
+  Recherche des prospects dans la base selon critères géographiques, 
+  sectoriels (NAF), taille, et score d'intention. 
+  Retourne les prospects les plus qualifiés pour l'outreach.
+parameters:
+  - name: city
+    type: string
+    description: "Ville cible (ex: 'Paris', 'Lyon')"
+  - name: naf_code
+    type: string
+    description: "Code NAF/APE sectoriel (ex: '62.01Z' pour dev logiciel)"
+  - name: min_score
+    type: integer
+    description: "Score d'intention minimum (0-100)"
+    default: 70
+  - name: max_results
+    type: integer
+    description: "Nombre maximum de résultats"
+    default: 20
+statement: |
+  SELECT 
+    p.id,
+    p.siren,
+    p.siret,
+    p.company_name,
+    p.legal_form,
+    p.naf_code,
+    p.naf_label,
+    p.city,
+    p.postal_code,
+    p.employee_count_band,
+    p.revenue_estimate,
+    p.intent_score,
+    p.intent_signals,
+    p.website,
+    p.linkedin_url,
+    p.last_enrichment_date,
+    p.contact_email,
+    p.contact_phone,
+    p.decision_maker_name,
+    p.decision_maker_title,
+    p.status,
+    p.created_at
+  FROM prospects p
+  WHERE 
+    ($1 IS NULL OR p.city ILIKE '%' || $1 || '%')
+    AND ($2 IS NULL OR p.naf_code = $2)
+    AND p.intent_score >= $3
+    AND p.status IN ('discovered', 'enriched', 'qualified')
+  ORDER BY p.intent_score DESC, p.revenue_estimate DESC
+  LIMIT $4;
+
+# --- Outil 2: Enrichissement prospect existant ---
+kind: tool
+name: enrich_prospect_data
+type: postgres-sql
+source: supabase-prospects-db
+description: >
+  Met à jour un prospect avec données enrichies (site web, emails, 
+  décideurs, signaux d'intention). Utilisé après scraping/analyse.
+parameters:
+  - name: prospect_id
+    type: string
+    description: "UUID du prospect"
+  - name: website
+    type: string
+    description: "URL du site web"
+  - name: contact_email
+    type: string
+    description: "Email de contact découvert"
+  - name: decision_maker_name
+    type: string
+    description: "Nom du décideur"
+  - name: decision_maker_title
+    type: string
+    description: "Titre du poste du décideur"
+  - name: intent_signals
+    type: string
+    description: "JSON des signaux d'intention détectés"
+  - name: intent_score
+    type: integer
+    description: "Nouveau score d'intention (0-100)"
+statement: |
+  UPDATE prospects 
+  SET 
+    website = COALESCE($2, website),
+    contact_email = COALESCE($3, contact_email),
+    decision_maker_name = COALESCE($4, decision_maker_name),
+    decision_maker_title = COALESCE($5, decision_maker_title),
+    intent_signals = COALESCE($6::jsonb, intent_signals),
+    intent_score = COALESCE($7, intent_score),
+    last_enrichment_date = NOW(),
+    status = CASE 
+      WHEN $7 >= 85 THEN 'hot_lead'
+      WHEN $7 >= 70 THEN 'qualified'
+      ELSE 'enriched'
+    END,
+    updated_at = NOW()
+  WHERE id = $1
+  RETURNING *;
+
+# --- Outil 3: Création nouveau prospect ---
+kind: tool
+name: create_prospect
+type: postgres-sql
+source: supabase-prospects-db
+description: >
+  Insère un nouveau prospect découvert via Sirene API ou Overpass.
+  Vérifie l'unicité SIRET avant insertion.
+parameters:
+  - name: siren
+    type: string
+    description: "Numéro SIREN 9 chiffres"
+  - name: siret
+    type: string
+    description: "Numéro SIRET 14 chiffres"
+  - name: company_name
+    type: string
+    description: "Raison sociale"
+  - name: legal_form
+    type: string
+    description: "Forme juridique"
+  - name: naf_code
+    type: string
+    description: "Code NAF/APE"
+  - name: naf_label
+    type: string
+    description: "Libellé NAF"
+  - name: address
+    type: string
+    description: "Adresse complète"
+  - name: city
+    type: string
+    description: "Ville"
+  - name: postal_code
+    type: string
+    description: "Code postal"
+  - name: employee_count_band
+    type: string
+    description: "Tranche effectifs (ex: '10-19')"
+  - name: revenue_estimate
+    type: integer
+    description: "Chiffre d'affaires estimé"
+  - name: source
+    type: string
+    description: "Source découverte (sirene_api, overpass, exa_search, etc)"
+statement: |
+  INSERT INTO prospects (
+    id, siren, siret, company_name, legal_form, naf_code, naf_label,
+    address, city, postal_code, employee_count_band, revenue_estimate,
+    source, status, created_at, updated_at
+  ) VALUES (
+    gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'discovered', NOW(), NOW()
+  )
+  ON CONFLICT (siret) DO NOTHING
+  RETURNING *;
+
+# --- Outil 4: Suivi interactions ---
+kind: tool
+name: log_interaction
+type: postgres-sql
+source: supabase-prospects-db
+description: >
+  Enregistre une interaction avec un prospect (email, appel, RDV, note).
+  Utilisé pour le suivi et l'analyse des séquences.
+parameters:
+  - name: prospect_id
+    type: string
+    description: "UUID du prospect"
+  - name: interaction_type
+    type: string
+    description: "Type: email_sent, email_opened, email_replied, call_made, meeting_booked, note"
+  - name: content
+    type: string
+    description: "Contenu ou résumé de l'interaction"
+  - name: channel
+    type: string
+    description: "Canal: email, linkedin, phone, cal_com, other"
+  - name: sentiment
+    type: string
+    description: "Sentiment détecté: positive, neutral, negative"
+statement: |
+  INSERT INTO interactions (
+    id, prospect_id, interaction_type, content, channel, sentiment, created_at
+  ) VALUES (
+    gen_random_uuid(), $1, $2, $3, $4, $5, NOW()
+  )
+  RETURNING *;
+
+# --- Outil 5: Analyse pipeline commercial ---
+kind: tool
+name: get_pipeline_analytics
+type: postgres-sql
+source: supabase-prospects-db
+description: >
+  Retourne les KPIs du pipeline: nombre par statut, conversion rates,
+  temps moyen entre étapes, sources les plus performantes.
+parameters:
+  - name: date_from
+    type: string
+    description: "Date début (YYYY-MM-DD)"
+  - name: date_to
+    type: string
+    description: "Date fin (YYYY-MM-DD)"
+statement: |
+  WITH status_counts AS (
+    SELECT status, COUNT(*) as count
+    FROM prospects
+    WHERE created_at BETWEEN $1::date AND $2::date
+    GROUP BY status
+  ),
+  conversion_rates AS (
+    SELECT 
+      source,
+      COUNT(*) FILTER (WHERE status = 'discovered') as discovered,
+      COUNT(*) FILTER (WHERE status = 'qualified') as qualified,
+      COUNT(*) FILTER (WHERE status = 'hot_lead') as hot_leads,
+      COUNT(*) FILTER (WHERE status = 'meeting_booked') as meetings,
+      COUNT(*) FILTER (WHERE status = 'won') as won,
+      ROUND(
+        COUNT(*) FILTER (WHERE status = 'meeting_booked')::numeric / 
+        NULLIF(COUNT(*) FILTER (WHERE status = 'discovered'), 0) * 100, 2
+      ) as conversion_rate
+    FROM prospects
+    WHERE created_at BETWEEN $1::date AND $2::date
+    GROUP BY source
+  )
+  SELECT 
+    jsonb_build_object(
+      'status_counts', (SELECT jsonb_agg(jsonb_build_object('status', status, 'count', count)) FROM status_counts),
+      'conversion_by_source', (SELECT jsonb_agg(jsonb_build_object(
+        'source', source, 'discovered', discovered, 'qualified', qualified, 
+        'hot_leads', hot_leads, 'meetings', meetings, 'won', won, 'conversion_rate', conversion_rate
+      )) FROM conversion_rates),
+      'total_prospects', (SELECT SUM(count) FROM status_counts)
+    ) as analytics;
+
+# ============================================
+# TOOLSETS - Groupes d'outils par workflow
+# ============================================
+
+kind: toolset
+name: discovery_toolset
+tools:
+  - search_prospects_by_criteria
+  - create_prospect
+  - get_pipeline_analytics
+
+description: "Outils pour la découverte et création de prospects"
+
+---
+
+kind: toolset
+name: enrichment_toolset
+tools:
+  - enrich_prospect_data
+  - log_interaction
+
+description: "Outils pour l'enrichissement et le suivi des prospects"
+
+---
+
+kind: toolset
+name: analytics_toolset
+tools:
+  - get_pipeline_analytics
+  - search_prospects_by_criteria
+
+description: "Outils d'analyse et reporting du pipeline"

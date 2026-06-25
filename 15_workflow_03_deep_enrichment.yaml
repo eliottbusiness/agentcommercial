@@ -1,0 +1,212 @@
+# ============================================
+# WORKFLOW 03: Deep Enrichment
+# Version: 1.0 | Agent Commercial Autonome
+# Trigger: Toutes les 2 heures (cron: 0 */2 * * *)
+# ============================================
+
+workflow:
+  name: "Deep Enrichment"
+  id: "03_deep_enrichment"
+  version: "1.0.0"
+
+  trigger:
+    type: "scheduled"
+    cron: "0 */2 * * *"  # Toutes les 2 heures
+
+  description: >
+    Enrichit les prospects "discovered" avec données digitales, signaux d'intention,
+    et décideurs. Objectif: 100% des prospects enrichis sous 24h, taux complétude >= 80%.
+
+  steps:
+    # --- Étape 1: Récupération prospects à enrichir ---
+    - id: "fetch_to_enrich"
+      name: "Fetch Prospects to Enrich"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          id, siren, siret, company_name, naf_code, naf_label,
+          city, website, linkedin_url, status
+        FROM prospects
+        WHERE status = 'discovered'
+        AND is_duplicated = FALSE
+        AND (last_enrichment_date IS NULL OR last_enrichment_date < NOW() - INTERVAL '24 hours')
+        ORDER BY created_at ASC
+        LIMIT 50
+      output: "prospects_to_enrich"
+
+    # --- Étape 2: Enrichissement SIRENE (données structurées) ---
+    - id: "enrich_sirene"
+      name: "Enrich from SIRENE API"
+      action: "parallel_for"
+      foreach: "{{prospects_to_enrich}}"
+      max_parallel: 10
+      condition: "item.siren IS NOT NULL"
+      tool: "datagouv_mcp"
+      method: "query_resource_data"
+      params:
+        dataset_id: "sirene_dataset_id"
+        query: "SELECT * FROM sirene WHERE siren = '{{item.siren}}'"
+      output: "sirene_data"
+
+    # --- Étape 3: Scraping site web ---
+    - id: "scrape_websites"
+      name: "Scrape Company Websites"
+      action: "parallel_for"
+      foreach: "{{prospects_to_enrich}}"
+      max_parallel: 5
+      condition: "item.website IS NOT NULL"
+      tool: "agent_reach_web"
+      method: "jina_reader"
+      url: "https://r.jina.ai/{{item.website}}"
+      output: "website_data"
+
+    # --- Étape 4: Extraction tech stack ---
+    - id: "extract_tech"
+      name: "Extract Tech Stack"
+      action: "for_each"
+      foreach: "{{website_data}}"
+      tool: "analysis_engine"
+      params:
+        html_content: "{{item.content}}"
+        detect:
+          - cms: ["WordPress", "Webflow", "Shopify", "Wix", "Squarespace"]
+          - frameworks: ["React", "Vue", "Angular", "Next.js", "Nuxt"]
+          - analytics: ["Google Analytics", "Mixpanel", "Amplitude", "Segment"]
+          - chat: ["Intercom", "Crisp", "Tidio", "Drift"]
+          - infra: ["Cloudflare", "AWS", "Vercel", "Netlify", "Heroku"]
+          - backend: ["Node.js", "Python", "Ruby", "PHP", "Go"]
+      output: "tech_stack_data"
+
+    # --- Étape 5: Recherche décideurs LinkedIn ---
+    - id: "find_decision_makers"
+      name: "Find Decision Makers"
+      action: "parallel_for"
+      foreach: "{{prospects_to_enrich}}"
+      max_parallel: 3
+      tool: "exa_mcp"
+      method: "exa_search"
+      query: "site:linkedin.com/in (CTO OR "Directeur technique" OR "VP Engineering" OR "Head of Engineering") {{item.company_name}}"
+      output: "decision_makers"
+
+    # --- Étape 6: Recherche signaux Twitter ---
+    - id: "twitter_signals"
+      name: "Search Twitter Signals"
+      action: "parallel_for"
+      foreach: "{{prospects_to_enrich}}"
+      max_parallel: 3
+      condition: "item.website IS NOT NULL"
+      tool: "agent_reach_twitter"
+      method: "twitter_search"
+      query: "{{item.company_name}} OR {{item.brand_name}}"
+      output: "twitter_signals"
+
+    # --- Étape 7: Recherche signaux Reddit ---
+    - id: "reddit_signals"
+      name: "Search Reddit Signals"
+      action: "parallel_for"
+      foreach: "{{prospects_to_enrich}}"
+      max_parallel: 2
+      tool: "agent_reach_reddit"
+      method: "reddit_search"
+      query: "{{item.company_name}}"
+      subreddits: ["r/france", "r/entrepreneur", "r/webdev", "r/startups"]
+      output: "reddit_signals"
+
+    # --- Étape 8: Consolidation données ---
+    - id: "consolidate_data"
+      name: "Consolidate Enrichment Data"
+      action: "merge"
+      inputs:
+        - "{{sirene_data}}"
+        - "{{website_data}}"
+        - "{{tech_stack_data}}"
+        - "{{decision_makers}}"
+        - "{{twitter_signals}}"
+        - "{{reddit_signals}}"
+      merge_key: "prospect_id"
+      output: "enriched_data"
+
+    # --- Étape 9: Mise à jour Supabase ---
+    - id: "update_prospects"
+      name: "Update Prospects in Database"
+      action: "for_each"
+      foreach: "{{enriched_data}}"
+      tool: "google_toolbox_postgres"
+      method: "enrich_prospect_data"
+      params:
+        prospect_id: "{{item.id}}"
+        website: "{{item.website}}"
+        contact_email: "{{item.contact_email}}"
+        contact_phone: "{{item.contact_phone}}"
+        decision_maker_name: "{{item.decision_maker_name}}"
+        decision_maker_title: "{{item.decision_maker_title}}"
+        tech_stack: "{{item.tech_stack}}"
+        intent_signals: "{{item.intent_signals}}"
+        intent_score: "{{item.calculated_intent_score}}"
+      output: "update_results"
+
+    # --- Étape 10: Vérification qualité ---
+    - id: "quality_check"
+      name: "Quality Verification"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT 
+          COUNT(*) as total_enriched,
+          COUNT(*) FILTER (WHERE website IS NOT NULL) as with_website,
+          COUNT(*) FILTER (WHERE contact_email IS NOT NULL OR contact_phone IS NOT NULL) as with_contact,
+          COUNT(*) FILTER (WHERE decision_maker_name IS NOT NULL) as with_decision_maker,
+          COUNT(*) FILTER (WHERE intent_score > 0) as with_intent,
+          ROUND(
+            (COUNT(*) FILTER (WHERE website IS NOT NULL AND 
+                              (contact_email IS NOT NULL OR contact_phone IS NOT NULL) AND
+                              decision_maker_name IS NOT NULL AND
+                              intent_score > 0)::numeric / COUNT(*) * 100), 2
+          ) as completeness_rate
+        FROM prospects
+        WHERE status = 'enriched'
+        AND updated_at > NOW() - INTERVAL '2 hours'
+      output: "quality_metrics"
+
+    # --- Étape 11: Alertes si qualité insuffisante ---
+    - id: "quality_alert"
+      name: "Quality Alert"
+      action: "conditional"
+      condition: "{{quality_metrics.completeness_rate}} < 80"
+      then:
+        - action: "send_notification"
+          message: "⚠️ Enrichment completeness dropped to {{quality_metrics.completeness_rate}}%. Target: 80%."
+
+    # --- Étape 12: Logging ---
+    - id: "log_enrichment"
+      name: "Log Enrichment Results"
+      action: "log_end"
+      params:
+        workflow_id: "03_deep_enrichment"
+        prospects_processed: "{{prospects_to_enrich.count}}"
+        enrichment_success: "{{update_results.success_count}}"
+        completeness_rate: "{{quality_metrics.completeness_rate}}"
+        avg_processing_time: "{{elapsed_time / prospects_to_enrich.count}}"
+
+  error_handling:
+    - condition: "website_scrape_failed"
+      action: "retry"
+      max_retries: 2
+      delay: 10
+      fallback: "mark_website_unavailable"
+
+    - condition: "sirene_api_error"
+      action: "log_error"
+      message: "SIRENE API error for SIREN {{item.siren}}"
+
+    - condition: "rate_limit_exceeded"
+      action: "throttle"
+      delay_seconds: 60
+
+  metrics:
+    - enrichment_completion_rate
+    - average_enrichment_time
+    - data_completeness_rate
+    - signal_detection_rate
+    - error_rate_by_source

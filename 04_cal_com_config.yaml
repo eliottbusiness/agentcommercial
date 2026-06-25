@@ -1,0 +1,244 @@
+# ============================================
+# CAL.COM CONFIGURATION - Agent Commercial
+# Version: 1.0 | Free Tier: 25 bookings/mois, $0.99 au-delà
+# ============================================
+
+api:
+  base_url: "https://api.cal.com/v2"
+  version: "v2"
+
+  # Authentification: API Key depuis Cal.com > Settings > Developer
+  # Free tier: Platform Starter (25 bookings/mois gratuits)
+  auth:
+    type: "api_key"
+    header: "Authorization"
+    prefix: "Bearer"
+    key_env: "CAL_COM_API_KEY"
+
+  # Rate Limits Free Tier
+  rate_limits:
+    requests_per_minute: 60
+    requests_per_day: 1000
+    notes: "Limites généreuses pour usage agent autonome"
+
+# ============================================
+# EVENT TYPES (Types de rendez-vous)
+# ============================================
+
+event_types:
+  discovery_call:
+    name: "Appel Découverte 30min"
+    slug: "discovery-call"
+    duration: 30
+    description: "Premier échange pour comprendre vos besoins et objectifs"
+
+    # Disponibilités
+    schedule:
+      timezone: "Europe/Paris"
+      days:
+        monday:    { start: "09:00", end: "18:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"] }
+        tuesday:   { start: "09:00", end: "18:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"] }
+        wednesday: { start: "09:00", end: "18:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"] }
+        thursday:  { start: "09:00", end: "18:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"] }
+        friday:    { start: "09:00", end: "17:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00"] }
+      buffer_before: 15  # minutes de préparation
+      buffer_after: 15   # minutes de débrief
+      minimum_notice: 24  # heures (pas de RDV dans moins de 24h)
+      maximum_future: 14  # jours (max 2 semaines à l'avance)
+
+    # Questions de qualification (intake)
+    booking_fields:
+      - name: "company_name"
+        type: "text"
+        label: "Nom de votre entreprise"
+        required: true
+
+      - name: "company_size"
+        type: "select"
+        label: "Taille de l'entreprise"
+        options: ["1-10", "11-50", "51-200", "201-500", "500+"]
+        required: true
+
+      - name: "current_challenge"
+        type: "textarea"
+        label: "Quel est votre principal défi actuel ?"
+        required: true
+        placeholder: "Décrivez brièvement votre situation..."
+
+      - name: "budget_range"
+        type: "select"
+        label: "Fourchette budget annuelle estimée"
+        options: ["< 10K€", "10-50K€", "50-100K€", "100-250K€", "250K€+"]
+        required: false
+
+      - name: "decision_timeline"
+        type: "select"
+        label: "Délai de décision estimé"
+        options: ["Immédiat (< 1 mois)", "Court terme (1-3 mois)", "Moyen terme (3-6 mois)", "Long terme (6+ mois)"]
+        required: true
+
+    # Confirmation & Notifications
+    confirmation:
+      require_email_confirmation: true
+      send_calendar_invite: true
+      send_reminder_24h: true
+      send_reminder_1h: true
+
+    # Intégrations
+    integrations:
+      video_conferencing: "cal_video"  # Cal Video (gratuit inclus)
+      calendar_sync: ["google_calendar", "outlook_calendar"]
+
+  demo_call:
+    name: "Démonstration Personnalisée 45min"
+    slug: "demo-call"
+    duration: 45
+    description: "Démonstration sur-mesure de notre solution"
+    schedule:
+      timezone: "Europe/Paris"
+      days:
+        monday:    { start: "10:00", end: "17:00", slots: ["10:00", "11:00", "14:00", "15:00", "16:00"] }
+        tuesday:   { start: "10:00", end: "17:00", slots: ["10:00", "11:00", "14:00", "15:00", "16:00"] }
+        wednesday: { start: "10:00", end: "17:00", slots: ["10:00", "11:00", "14:00", "15:00", "16:00"] }
+        thursday:  { start: "10:00", end: "17:00", slots: ["10:00", "11:00", "14:00", "15:00", "16:00"] }
+      buffer_before: 30
+      buffer_after: 30
+      minimum_notice: 48
+      maximum_future: 21
+    booking_fields:
+      - name: "use_case"
+        type: "textarea"
+        label: "Décrivez votre cas d'usage principal"
+        required: true
+      - name: "team_size"
+        type: "number"
+        label: "Nombre d'utilisateurs potentiels"
+        required: true
+
+  follow_up:
+    name: "Suivi & Questions 15min"
+    slug: "follow-up"
+    duration: 15
+    description: "Court appel de suivi ou réponses à vos questions"
+    schedule:
+      timezone: "Europe/Paris"
+      days:
+        monday:    { start: "09:00", end: "18:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"] }
+        tuesday:   { start: "09:00", end: "18:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"] }
+        wednesday: { start: "09:00", end: "18:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"] }
+        thursday:  { start: "09:00", end: "18:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"] }
+        friday:    { start: "09:00", end: "17:00", slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00"] }
+      buffer_before: 5
+      buffer_after: 5
+      minimum_notice: 4
+      maximum_future: 7
+
+# ============================================
+# WEBHOOKS - Synchronisation avec Supabase
+# ============================================
+
+webhooks:
+  endpoint: "${SUPABASE_EDGE_FUNCTION_URL}/cal-webhook"
+  secret_env: "CAL_WEBHOOK_SECRET"
+
+  events:
+    - booking_created:
+        action: "create_interaction_meeting_booked"
+        update_prospect_status: "meeting_booked"
+
+    - booking_rescheduled:
+        action: "update_interaction_rescheduled"
+
+    - booking_cancelled:
+        action: "update_interaction_cancelled"
+        update_prospect_status: "nurture"
+
+    - booking_completed:
+        action: "update_interaction_completed"
+        trigger_follow_up_sequence: true
+
+    - booking_no_show:
+        action: "update_interaction_no_show"
+        update_prospect_status: "contacted"
+        trigger_reengagement: true
+
+# ============================================
+# AUTOMATION RULES
+# ============================================
+
+automation:
+  # Quand un prospect hot_lead répond positivement → proposer RDV découverte
+  hot_lead_to_discovery:
+    trigger: "prospect_status = 'hot_lead' AND interaction_sentiment = 'positive'"
+    action: "send_cal_link"
+    event_type: "discovery_call"
+    template: "personalized_discovery_invite"
+
+  # Quand un prospect a pris RDV → envoyer préparation
+  pre_meeting_brief:
+    trigger: "booking_created"
+    action: "send_preparation_email"
+    delay_hours: 2
+    content: "brief_personnalise_prospect"
+
+  # Post-RDV: si meeting_completed et sentiment positif → proposer démo
+  post_meeting_demo:
+    trigger: "booking_completed AND interaction_sentiment = 'positive'"
+    action: "propose_demo_call"
+    event_type: "demo_call"
+    delay_hours: 24
+
+# ============================================
+# TEMPLATES DE MESSAGES
+# ============================================
+
+templates:
+  discovery_invite:
+    subject: "Votre appel découverte - {{prospect.company_name}}"
+    body: |
+      Bonjour {{prospect.decision_maker_name}},
+
+      Merci pour votre intérêt. J'ai identifié {{prospect.company_name}} comme 
+      une entreprise en pleine {{prospect.growth_signal}} et je pense que nous 
+      pourrions vous aider sur {{prospect.pain_point_identified}}.
+
+      Je vous propose un échange de 30 minutes pour explorer ensemble :
+      - Vos objectifs actuels
+      - Les défis que vous rencontrez
+      - Comment nous avons aidé {{prospect.lookalike_case_study}}
+
+      Voici mon lien de réservation : {{cal_link}}
+
+      À bientôt,
+      {{agent_name}}
+
+  demo_invite:
+    subject: "Démonstration personnalisée pour {{prospect.company_name}}"
+    body: |
+      Bonjour {{prospect.decision_maker_name}},
+
+      Suite à notre échange enrichissant, je vous propose une démonstration
+      personnalisée de 45 minutes. J'ai préparé un scénario basé sur :
+      - Votre cas d'usage : {{prospect.use_case}}
+      - Votre équipe de {{prospect.team_size}} personnes
+      - Vos contraintes spécifiques : {{prospect.constraints}}
+
+      Réservez ici : {{cal_link}}
+
+      Cordialement,
+      {{agent_name}}
+
+  reminder_24h:
+    subject: "Rappel: Notre appel demain à {{booking.time}}"
+    body: |
+      Bonjour {{prospect.decision_maker_name}},
+
+      Je vous confirme notre rendez-vous demain :
+      📅 {{booking.date}} à {{booking.time}}
+      📹 Lien visio: {{booking.video_link}}
+
+      Pour préparer au mieux notre échange, voici 3 questions rapides :
+      {{booking.intake_answers}}
+
+      À demain !
+      {{agent_name}}

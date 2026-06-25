@@ -1,0 +1,202 @@
+# ============================================
+# WORKFLOW 02: Prospect Discovery
+# Version: 1.0 | Agent Commercial Autonome
+# Trigger: Tous les jours à 6h00 (cron: 0 6 * * *)
+# ============================================
+
+workflow:
+  name: "Prospect Discovery"
+  id: "02_prospect_discovery"
+  version: "1.0.0"
+
+  trigger:
+    type: "scheduled"
+    cron: "0 6 * * *"  # 6h00 matin
+
+  description: >
+    Découvre de nouveaux prospects via SIRENE API, Overpass API, et Exa Search.
+    Filtre selon ICP, vérifie unicité, et insère dans Supabase.
+    Limite: 50 nouveaux prospects/jour pour maintenir la qualité.
+
+  steps:
+    # --- Étape 1: Initialisation quota ---
+    - id: "check_quota"
+      name: "Check Daily Quota"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        SELECT COUNT(*) as discovered_today
+        FROM prospects
+        WHERE created_at > CURRENT_DATE
+        AND source IN ('sirene_api', 'overpass', 'exa_search')
+      output: "quota_check"
+
+    - id: "quota_gate"
+      name: "Quota Gate"
+      action: "conditional"
+      condition: "{{quota_check.discovered_today}} >= 50"
+      then:
+        - action: "exit"
+          message: "Daily quota reached (50 prospects). Skipping discovery."
+      else:
+        - action: "continue"
+          remaining_quota: "{{50 - quota_check.discovered_today}}"
+
+    # --- Étape 2: Discovery SIRENE ---
+    - id: "discover_sirene"
+      name: "Discover via SIRENE API"
+      action: "execute_sql"
+      tool: "datagouv_mcp"
+      query: |
+        SELECT 
+          s.siren, s.siret, s.denominationUniteLegale as company_name,
+          s.activitePrincipaleUniteLegale as naf_code,
+          s.trancheEffectifsUniteLegale as employee_band,
+          s.dateCreationUniteLegale as creation_date,
+          a.numeroVoieEtablissement || ' ' || a.typeVoieEtablissement || ' ' || 
+            a.libelleVoieEtablissement as address,
+          a.libelleCommuneEtablissement as city,
+          a.codePostalEtablissement as postal_code,
+          a.codeDepartementEtablissement as department
+        FROM sirene s
+        JOIN adresses a ON s.siret = a.siret
+        WHERE s.activitePrincipaleUniteLegale IN (
+          '62.01Z', '62.02A', '62.03Z', '63.11Z', '63.12Z', '58.29Z', '61.10Z', '71.12Z'
+        )
+        AND s.trancheEffectifsUniteLegale IN ('11', '12', '21', '22', '31', '32', '41', '42')
+        AND s.dateCreationUniteLegale > CURRENT_DATE - INTERVAL '15 years'
+        AND s.dateCreationUniteLegale < CURRENT_DATE - INTERVAL '2 years'
+        AND a.etatAdministratifEtablissement = 'A'
+        AND a.libelleCommuneEtablissement IN (
+          'Paris', 'Lyon', 'Marseille', 'Toulouse', 'Bordeaux', 'Nantes', 
+          'Strasbourg', 'Lille', 'Montpellier', 'Rennes'
+        )
+        AND s.siret NOT IN (SELECT siret FROM prospects WHERE siret IS NOT NULL)
+        ORDER BY s.dateCreationUniteLegale DESC
+        LIMIT {{remaining_quota}}
+      output: "sirene_prospects"
+
+    # --- Étape 3: Discovery Overpass ---
+    - id: "discover_overpass"
+      name: "Discover via Overpass API"
+      action: "http_request"
+      method: "POST"
+      url: "https://overpass-api.de/api/interpreter"
+      headers:
+        Content-Type: "application/x-www-form-urlencoded"
+      body: |
+        [out:json][timeout:120];
+        (
+          area["name"="Paris"]->.searchArea;
+          node["office"="company"](area.searchArea);
+          way["office"="company"](area.searchArea);
+          relation["office"="company"](area.searchArea);
+        );
+        out body;
+        >;
+        out skel qt;
+      output: "overpass_prospects"
+
+    # --- Étape 4: Discovery Exa ---
+    - id: "discover_exa"
+      name: "Discover via Exa Search"
+      action: "tool_call"
+      tool: "exa_mcp"
+      method: "exa_search"
+      params:
+        query: "SaaS startups France 2026 hiring developers Paris Lyon"
+        num_results: 20
+        type: "company"
+        include_domains: ["linkedin.com", "welcometothejungle.com", "indeed.fr", "les-echos.fr"]
+      output: "exa_prospects"
+
+    # --- Étape 5: Deduplication ---
+    - id: "deduplicate"
+      name: "Deduplicate Prospects"
+      action: "execute_sql"
+      tool: "google_toolbox_postgres"
+      query: |
+        -- Vérifier doublons SIRET
+        WITH duplicates AS (
+          SELECT siret, COUNT(*) as cnt
+          FROM prospects
+          WHERE siret IS NOT NULL
+          GROUP BY siret
+          HAVING COUNT(*) > 1
+        )
+        SELECT * FROM duplicates
+      output: "existing_duplicates"
+
+    # --- Étape 6: ICP Filtering ---
+    - id: "icp_filter"
+      name: "Filter by ICP Criteria"
+      action: "for_each"
+      foreach: "{{sirene_prospects}}"
+      condition: |
+        item.naf_code IN ['62.01Z', '62.02A', '62.03Z', '63.11Z', '63.12Z', '58.29Z', '61.10Z', '71.12Z']
+        AND item.employee_band IN ['11', '12', '21', '22', '31', '32', '41', '42']
+        AND item.city IN ['Paris', 'Lyon', 'Marseille', 'Toulouse', 'Bordeaux', 'Nantes', 'Strasbourg', 'Lille']
+      output: "icp_filtered"
+
+    # --- Étape 7: Enrichissement initial ---
+    - id: "initial_enrich"
+      name: "Initial Enrichment"
+      action: "parallel_for"
+      foreach: "{{icp_filtered}}"
+      max_parallel: 10
+      steps:
+        - id: "find_website"
+          tool: "exa_mcp"
+          method: "exa_search"
+          query: "{{item.company_name}} official website"
+
+        - id: "find_linkedin"
+          tool: "exa_mcp"
+          method: "exa_search"
+          query: "site:linkedin.com/company {{item.company_name}}"
+
+      output: "enriched_prospects"
+
+    # --- Étape 8: Insertion Supabase ---
+    - id: "insert_prospects"
+      name: "Insert to Supabase"
+      action: "batch_insert"
+      tool: "google_toolbox_postgres"
+      table: "prospects"
+      data: "{{enriched_prospects}}"
+      conflict_resolution: "ON CONFLICT (siret) DO NOTHING"
+
+    # --- Étape 9: Logging ---
+    - id: "log_discovery"
+      name: "Log Discovery Results"
+      action: "log_end"
+      params:
+        workflow_id: "02_prospect_discovery"
+        sirene_found: "{{sirene_prospects.count}}"
+        overpass_found: "{{overpass_prospects.count}}"
+        exa_found: "{{exa_prospects.count}}"
+        icp_matched: "{{icp_filtered.count}}"
+        inserted: "{{insert_prospects.inserted_count}}"
+        duplicates_skipped: "{{insert_prospects.conflict_count}}"
+
+  error_handling:
+    - condition: "overpass_timeout"
+      action: "retry"
+      max_retries: 2
+      delay: 30
+
+    - condition: "sirene_rate_limit"
+      action: "throttle"
+      delay_seconds: 120
+
+    - condition: "insert_failure"
+      action: "log_error"
+      message: "Failed to insert prospects"
+      include_data: "{{enriched_prospects}}"
+
+  metrics:
+    - prospects_discovered_per_source
+    - icp_match_rate
+    - duplicate_rate
+    - insertion_success_rate
+    - processing_time
